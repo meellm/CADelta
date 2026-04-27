@@ -1,0 +1,6 @@
+cadquery-ocp>=7.7
+numpy
+click
+
+[dev]
+pytest>=7

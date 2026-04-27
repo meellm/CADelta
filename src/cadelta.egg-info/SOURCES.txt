@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+src/cadelta/__init__.py
+src/cadelta/cli.py
+src/cadelta/matcher.py
+src/cadelta/reader.py
+src/cadelta/signature.py
+src/cadelta/writer.py
+src/cadelta.egg-info/PKG-INFO
+src/cadelta.egg-info/SOURCES.txt
+src/cadelta.egg-info/dependency_links.txt
+src/cadelta.egg-info/entry_points.txt
+src/cadelta.egg-info/requires.txt
+src/cadelta.egg-info/top_level.txt
+tests/test_integration.py
+tests/test_matcher.py
+tests/test_signature.py

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cadelta"
+version = "0.1.0"
+description = "Visual diff for STEP CAD files — colors added/removed/moved parts in a single output."
+requires-python = ">=3.11"
+dependencies = [
+    "cadquery-ocp>=7.7",
+    "numpy",
+    "click",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+]
+
+[project.scripts]
+cadelta = "cadelta.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
