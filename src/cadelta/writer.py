@@ -77,6 +77,22 @@ def _translate_shape(shape, dx: float):
     return BRepBuilderAPI_Transform(shape, trsf, True).Shape()
 
 
+def _bake_location(shape):
+    """Bake any TopLoc_Location into the geometry so AddShape stores a flat free shape.
+
+    The reader returns shapes carrying a world-space TopLoc_Location. If we hand those
+    to XCAFDoc_ShapeTool.AddShape with makeAssembly=False, XCAF still auto-splits them
+    into master+instance pairs, which produces a master/instance graph that OCCT itself
+    can re-read but that third-party CAD viewers may reject. Baking the location into a
+    fresh copy of the geometry sidesteps that path entirely.
+    """
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    loc = shape.Location()
+    if loc.IsIdentity():
+        return shape
+    return BRepBuilderAPI_Transform(shape, loc.Transformation(), True).Shape()
+
+
 def write_diff(
     diff: DiffResult,
     out_step: Path,
@@ -90,6 +106,7 @@ def write_diff(
     from OCP.STEPCAFControl import STEPCAFControl_Writer
     from OCP.STEPControl import STEPControl_AsIs
     from OCP.IFSelect import IFSelect_RetDone
+    from OCP.Interface import Interface_Static
 
     doc = _new_doc()
     shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
@@ -103,8 +120,9 @@ def write_diff(
         part = entry.part_v2
         if part is None or part.shape is None:
             continue
-        v2_shapes.append(part.shape)
-        label = shape_tool.AddShape(part.shape, False)
+        baked = _bake_location(part.shape)
+        v2_shapes.append(baked)
+        label = shape_tool.AddShape(baked, False)
         status_tag = {
             Status.ADDED: "ADDED",
             Status.MOVED: "MOVED",
@@ -125,9 +143,10 @@ def write_diff(
         part = entry.part_v1
         if part is None or part.shape is None:
             continue
-        rxmin, rxmax = _shape_xmin_xmax(part.shape)
+        baked = _bake_location(part.shape)
+        rxmin, rxmax = _shape_xmin_xmax(baked)
         dx = drop_x - rxmin
-        moved = _translate_shape(part.shape, dx)
+        moved = _translate_shape(baked, dx)
         # advance drop_x for the next removed part
         drop_x = drop_x + (rxmax - rxmin) + REMOVED_OFFSET_GAP_MM
 
@@ -141,7 +160,18 @@ def write_diff(
     out_step = Path(out_step)
     out_step.parent.mkdir(parents=True, exist_ok=True)
 
+    # AP214IS is the canonical schema for color-bearing STEP files; default may emit
+    # AP203 (no color support), which strict viewers reject when STYLED_ITEM entities
+    # appear without matching schema declarations.
+    Interface_Static.SetCVal_s("write.step.schema", "AP214IS")
+
     step_writer = STEPCAFControl_Writer()
+    # Mirror the reader's symmetric setup so XCAF metadata (colors, names, layers) is
+    # serialized as well-formed STEP entities. Without these the writer can emit color
+    # references that OCCT tolerates on re-read but third-party CAD viewers reject.
+    step_writer.SetColorMode(True)
+    step_writer.SetNameMode(True)
+    step_writer.SetLayerMode(True)
     if not step_writer.Transfer(doc, STEPControl_AsIs):
         raise RuntimeError(f"Failed to transfer XCAFDoc into STEP writer: {out_step}")
     write_status = step_writer.Write(str(out_step))
