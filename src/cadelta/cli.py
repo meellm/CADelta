@@ -32,7 +32,7 @@ def main(v1: Path, v2: Path, output: Path, gltf: Path | None,
 
       green  = added   (in V2 only)
       yellow = moved   (in both, pose differs beyond tolerance)
-      red    = removed (in V1 only; placed offset outside the V2 bounding box)
+      red    = removed (in V1 only; rendered at its original V1 position)
       gray   = unchanged
     """
     click.echo(f"Reading {v1} ...", err=True)

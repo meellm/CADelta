@@ -3,8 +3,10 @@ Name: cadelta
 Version: 0.1.0
 Summary: Visual diff for STEP CAD files — colors added/removed/moved parts in a single output.
 Requires-Python: >=3.11
+License-File: LICENSE
 Requires-Dist: cadquery-ocp>=7.7
 Requires-Dist: numpy
 Requires-Dist: click
 Provides-Extra: dev
 Requires-Dist: pytest>=7; extra == "dev"
+Dynamic: license-file

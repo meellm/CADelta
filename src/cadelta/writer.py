@@ -14,9 +14,6 @@ COLOR_BY_STATUS = {
     Status.UNCHANGED: (0.60, 0.60, 0.60),  # gray
 }
 
-REMOVED_OFFSET_GAP_MM = 50.0
-
-
 def _new_doc():
     from OCP.TDocStd import TDocStd_Document
     from OCP.TCollection import TCollection_ExtendedString
@@ -41,24 +38,8 @@ def _set_name(label, name: str) -> None:
     TDataStd_Name.Set_s(label, TCollection_ExtendedString(name))
 
 
-def _bbox_xmax_xmin(shapes) -> tuple[float, float]:
-    """Return (xmin, xmax) over the union of bounding boxes; (0, 0) if empty."""
-    from OCP.Bnd import Bnd_Box
-    from OCP.BRepBndLib import BRepBndLib
-    bb = Bnd_Box()
-    found = False
-    for s in shapes:
-        if s is None or s.IsNull():
-            continue
-        BRepBndLib.Add_s(s, bb)
-        found = True
-    if not found or bb.IsVoid():
-        return 0.0, 0.0
-    xmin, _, _, xmax, _, _ = bb.Get()
-    return xmin, xmax
-
-
 def _shape_xmin_xmax(shape) -> tuple[float, float]:
+    """Return (xmin, xmax) of a shape's axis-aligned bounding box; (0, 0) if void."""
     from OCP.Bnd import Bnd_Box
     from OCP.BRepBndLib import BRepBndLib
     bb = Bnd_Box()
@@ -69,14 +50,6 @@ def _shape_xmin_xmax(shape) -> tuple[float, float]:
     return xmin, xmax
 
 
-def _translate_shape(shape, dx: float):
-    from OCP.gp import gp_Trsf, gp_Vec
-    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
-    trsf = gp_Trsf()
-    trsf.SetTranslation(gp_Vec(dx, 0.0, 0.0))
-    return BRepBuilderAPI_Transform(shape, trsf, True).Shape()
-
-
 def _bake_location(shape):
     """Bake any TopLoc_Location into the geometry so AddShape stores a flat free shape.
 
@@ -85,12 +58,20 @@ def _bake_location(shape):
     into master+instance pairs, which produces a master/instance graph that OCCT itself
     can re-read but that third-party CAD viewers may reject. Baking the location into a
     fresh copy of the geometry sidesteps that path entirely.
+
+    Note: BRepBuilderAPI_Transform composes the given trsf ON TOP of the shape's
+    existing location. Passing a located shape together with its own location's trsf
+    would apply the transform twice (L · L = L²). We strip the location to identity
+    first, then apply the trsf — yielding a fresh shape at L(geometry) with identity
+    location, which is what we actually want.
     """
     from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    from OCP.TopLoc import TopLoc_Location
     loc = shape.Location()
     if loc.IsIdentity():
         return shape
-    return BRepBuilderAPI_Transform(shape, loc.Transformation(), True).Shape()
+    bare = shape.Located(TopLoc_Location())
+    return BRepBuilderAPI_Transform(bare, loc.Transformation(), True).Shape()
 
 
 def write_diff(
@@ -113,7 +94,6 @@ def write_diff(
     color_tool = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
 
     # --- v2 parts: added / moved / unchanged ---
-    v2_shapes = []
     for entry in diff.entries:
         if entry.status == Status.REMOVED:
             continue
@@ -121,7 +101,6 @@ def write_diff(
         if part is None or part.shape is None:
             continue
         baked = _bake_location(part.shape)
-        v2_shapes.append(baked)
         label = shape_tool.AddShape(baked, False)
         status_tag = {
             Status.ADDED: "ADDED",
@@ -134,9 +113,10 @@ def write_diff(
         color_tool.SetColor(label, qcolor, XCAFDoc_ColorSurf)
         color_tool.SetColor(label, qcolor, XCAFDoc_ColorGen)
 
-    # --- removed parts: translated outside the v2 bbox in +X ---
-    _, v2_xmax = _bbox_xmax_xmin(v2_shapes)
-    drop_x = v2_xmax + REMOVED_OFFSET_GAP_MM
+    # --- removed parts: rendered in place at their original v1 world-space position ---
+    # The reader stores each part with a TopLoc_Location carrying its world transform;
+    # _bake_location() flattens that into geometry so the part sits where it used to be
+    # in v1. Red color distinguishes removed parts from v2 ghosts that may overlap.
     for entry in diff.entries:
         if entry.status != Status.REMOVED:
             continue
@@ -144,13 +124,7 @@ def write_diff(
         if part is None or part.shape is None:
             continue
         baked = _bake_location(part.shape)
-        rxmin, rxmax = _shape_xmin_xmax(baked)
-        dx = drop_x - rxmin
-        moved = _translate_shape(baked, dx)
-        # advance drop_x for the next removed part
-        drop_x = drop_x + (rxmax - rxmin) + REMOVED_OFFSET_GAP_MM
-
-        label = shape_tool.AddShape(moved, False)
+        label = shape_tool.AddShape(baked, False)
         display_name = f"[REMOVED] {part.name}" if part.name else "[REMOVED]"
         _set_name(label, display_name)
         qcolor = _quantity_color(COLOR_BY_STATUS[Status.REMOVED])

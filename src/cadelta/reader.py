@@ -16,6 +16,16 @@ class Part:
     transform: np.ndarray  # 4x4 world-space assembly transform (may be identity when geometry is baked)
     signature: Signature
     centroid: Optional[np.ndarray] = None  # world-space center of mass (3-vector)
+    # World-space orientation derived from the principal axes of inertia of the located
+    # shape. Representation-invariant (unlike `transform`, which only reflects the XCAF
+    # transform slot). `None` means the orientation is undefined — typical for synthetic
+    # test parts that bypass the reader.
+    orientation: Optional[np.ndarray] = None  # 3x3 right-handed rotation matrix
+    # True when at least two principal moments of inertia are nearly equal: the inertia
+    # frame is then rotationally ambiguous (cylinders, cubes, spheres, regular prisms).
+    # Rotation cannot be reliably detected for such parts, and visually it usually
+    # cannot be perceived either.
+    axisymmetric: bool = False
 
     def __post_init__(self):
         # If no explicit centroid is provided (e.g. synthetic test parts), derive it
@@ -43,6 +53,48 @@ def _location_to_matrix(loc) -> np.ndarray:
         for j in range(4):
             mat[i, j] = trsf.Value(i + 1, j + 1)
     return mat
+
+
+# Two principal moments are considered equal (axisymmetric) when their relative
+# difference is below this threshold. 1% catches cylinders, cubes, regular prisms,
+# and most fasteners while staying loose enough to avoid mis-flagging genuinely
+# asymmetric parts whose moments happen to be numerically close.
+_AXISYM_REL_TOL = 0.01
+
+
+def _orientation_from_inertia(vprops) -> tuple[Optional[np.ndarray], bool]:
+    """Build a 3x3 world-space rotation matrix from the principal axes of inertia.
+
+    Returns (orientation, axisymmetric):
+      orientation: right-handed 3x3 rotation matrix whose columns are the principal
+                   inertia axes of the located shape, or None if the shape is degenerate
+                   (zero volume, point, etc).
+      axisymmetric: True when at least two principal moments coincide, in which case
+                    the corresponding axes can rotate freely within their plane and
+                    rotation cannot be reliably detected.
+    """
+    pp = vprops.PrincipalProperties()
+    i1, i2, i3 = pp.Moments()
+    moments_sorted = sorted([float(i1), float(i2), float(i3)])
+    m_max = max(abs(moments_sorted[2]), 1e-12)
+    axisymmetric = (
+        abs(moments_sorted[1] - moments_sorted[0]) / m_max < _AXISYM_REL_TOL
+        or abs(moments_sorted[2] - moments_sorted[1]) / m_max < _AXISYM_REL_TOL
+    )
+
+    ax1 = pp.FirstAxisOfInertia()
+    ax2 = pp.SecondAxisOfInertia()
+    ax3 = pp.ThirdAxisOfInertia()
+    R = np.array([
+        [ax1.X(), ax2.X(), ax3.X()],
+        [ax1.Y(), ax2.Y(), ax3.Y()],
+        [ax1.Z(), ax2.Z(), ax3.Z()],
+    ], dtype=float)
+
+    # Force right-handedness so subsequent angle math is well-defined.
+    if np.linalg.det(R) < 0:
+        R[:, 2] *= -1.0
+    return R, axisymmetric
 
 
 def _read_doc(step_path: Path):
@@ -114,6 +166,13 @@ def load_parts(step_path: str | Path) -> list[Part]:
             BRepGProp.VolumeProperties_s(located, vprops)
             com = vprops.CentreOfMass()
             centroid = np.array([com.X(), com.Y(), com.Z()], dtype=float)
+
+            # Derive a world-space orientation from the principal axes of inertia.
+            # Unlike the XCAF transform, this is intrinsic to the located geometry,
+            # so it gives the same answer whether v1 stores rotation as a transform
+            # and v2 bakes it into geometry (or vice versa).
+            orientation, axisymmetric = _orientation_from_inertia(vprops)
+
             parts.append(
                 Part(
                     name=full_name,
@@ -121,6 +180,8 @@ def load_parts(step_path: str | Path) -> list[Part]:
                     transform=_location_to_matrix(parent_loc),
                     signature=sig,
                     centroid=centroid,
+                    orientation=orientation,
+                    axisymmetric=axisymmetric,
                 )
             )
 

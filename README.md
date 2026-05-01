@@ -8,9 +8,9 @@ Compare two versions of a mechanical assembly and see — in a single colored ou
 
 - 🟢 **Green** — parts added in v2
 - 🟡 **Yellow** — parts moved (translation > 0.01 mm or rotation > 0.01°)
-- 🔴 **Red** — parts removed (placed offset outside the v2 bounding box, so they don't pollute the live design)
+- 🔴 **Red** — parts removed (rendered in place at their original v1 position so you can see exactly what was lost where)
 - ⚪ **Gray** — unchanged
-- Smart matching — pairs parts by name first, falls back to a geometry signature (volume, surface area, sorted bounding-box, face count) so a rename doesn't masquerade as remove + add.
+- Smart matching — pairs parts by geometry signature (volume, surface area, sorted bounding-box, face count) and world-space centroid, so renames, re-exports, and STEP entity renumbering don't trigger spurious diffs.
 - Centroid-based movement detection — works whether position is encoded as an XCAF transform or baked into geometry coordinates.
 - Multiple outputs — colored STEP for your CAD app, GLB for any browser glTF viewer, JSON report for scripting.
 - Configurable tolerance, defaulting to 0.01 mm / 0.01°.
@@ -43,7 +43,7 @@ Open `diff.step` in your CAD application, or drag `diff.glb` into a glTF viewer 
 |-----------|-----------|-------------------------------------------------------------------------------------------------------------|
 | 🟢 Green  | added     | A part exists in v2 but not in v1.                                                                          |
 | 🟡 Yellow | moved     | A part exists in both, but its world-space center moved > 0.01 mm or rotated > 0.01°.                       |
-| 🔴 Red    | removed   | A part exists in v1 but not in v2. The original geometry is placed +X outside v2's bbox to keep it visible. |
+| 🔴 Red    | removed   | A part exists in v1 but not in v2. Rendered at its original v1 world-space position so the loss is visible in context. |
 | ⚪ Gray   | unchanged | Same name (or matching geometry) and same pose.                                                             |
 
 ## 📋 Commands
@@ -60,16 +60,15 @@ Open `diff.step` in your CAD application, or drag `diff.glb` into a glTF viewer 
 
 For each leaf part in v1 and v2, CADelta builds:
 
-- a **path-style name** drawn from the assembly hierarchy (e.g. `Asm/SubA/Bolt`),
 - a **geometry signature** — `(volume, surface area, sorted bbox dims, face count)`, computed on the master shape so it is pose-invariant,
-- a **world-space centroid** computed from the located volume, so movement is detected whether position lives in an XCAF transform or in the geometry itself.
+- a **world-space centroid** computed from the located volume, so movement is detected whether position lives in an XCAF transform or in the geometry itself,
+- a **world-space orientation** derived from the principal axes of inertia of the located shape, so rotation detection is invariant to how the rotation is encoded (transform vs baked geometry).
 
 The matcher then:
 
-1. **Name pairing.** A part with the same name in both versions becomes a candidate pair.
-2. **Signature pairing** runs over what is left, so a rename does not show up as remove + add.
-3. For each pair, if Δcentroid ≤ 0.01 mm and Δrotation ≤ 0.01° the part is **unchanged**; otherwise it is **moved**.
-4. Anything still unmatched in v1 is **removed**; anything still unmatched in v2 is **added**.
+1. **Spatial signature pairing.** Parts with identical signatures are grouped, then within each group v1 and v2 parts are matched one-to-one by closest centroid (greedy: smallest distance first). Names are intentionally ignored — STEP files routinely use auto-generated identifiers (e.g. `NAUO123`) that renumber when parts are removed, which would mis-pair physically different parts if used naively.
+2. For each pair, if Δcentroid ≤ 0.01 mm and Δrotation ≤ 0.01° the part is **unchanged**; otherwise it is **moved**. Rotation is computed from inertia-frame orientation, so axisymmetric parts (cylinders, fasteners) skip the rotation check.
+3. Anything still unmatched in v1 is **removed**; anything still unmatched in v2 is **added**.
 
 ## 📊 Performance
 

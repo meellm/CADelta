@@ -9,7 +9,7 @@ from cadelta.matcher import Status, diff_parts
 from cadelta.reader import load_parts
 from cadelta.writer import COLOR_BY_STATUS, write_diff
 
-from .conftest import box_at, make_step
+from .conftest import box_at, loc_rotate_z, loc_translate, make_assembly_step, make_step
 
 
 @pytest.fixture
@@ -70,9 +70,9 @@ def test_write_diff_produces_step_and_glb(step_pair, tmp_path: Path):
     assert out_glb.exists() and out_glb.stat().st_size > 0
 
 
-def test_diff_step_has_correct_colors_and_offset(step_pair, tmp_path: Path):
+def test_diff_step_has_correct_colors_and_positions(step_pair, tmp_path: Path):
     """Read the produced diff.step back and verify each part has the expected color
-    and that the removed part sits offset outside the v2 bounding box."""
+    and that the removed part sits at its original v1 world-space position."""
     from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ColorTool, XCAFDoc_ColorSurf
     from OCP.TDF import TDF_LabelSequence
     from OCP.Quantity import Quantity_Color
@@ -121,16 +121,109 @@ def test_diff_step_has_correct_colors_and_offset(step_pair, tmp_path: Path):
     assert d == rgb(Status.ADDED)
     assert c == rgb(Status.REMOVED)
 
-    # Verify the removed part sits to the right of all the v2 parts
-    from cadelta.writer import _shape_xmin_xmax
-    parts = load_parts(out_step)
-    by_tag = {p.name: p for p in parts}
-    removed_part = next(p for k, p in by_tag.items() if "REMOVED" in k)
-    v2_parts = [p for k, p in by_tag.items() if "REMOVED" not in k]
-    v2_xmax = max(_shape_xmin_xmax(p.shape)[1] for p in v2_parts)
-    removed_xmin, _ = _shape_xmin_xmax(removed_part.shape)
-    assert removed_xmin > v2_xmax, (
-        f"removed part xmin={removed_xmin} should sit past v2_xmax={v2_xmax}"
+    # Verify the removed part sits at its original v1 world-space position.
+    # In the fixture, C is a 20x20x20 box centered at (80, 0, 0) — its centroid
+    # in diff.step should match.
+    parts_v1 = load_parts(v1)
+    c_v1 = next(p for p in parts_v1 if p.name == "C")
+    parts_diff = load_parts(out_step)
+    removed_part = next(p for p in parts_diff if "REMOVED" in p.name)
+    assert removed_part.centroid == pytest.approx(c_v1.centroid, abs=1e-6), (
+        f"removed part centroid {removed_part.centroid} should match v1 position {c_v1.centroid}"
+    )
+
+
+def test_removed_part_in_assembly_step_preserves_v1_position(tmp_path: Path):
+    """Regression: when a removed part comes from an assembly whose pose lives in a
+    non-identity TopLoc_Location, diff.step must place the part at its original v1
+    world-space position. The earlier _bake_location implementation applied the
+    location twice (yielding L²(geometry)) on assembly-style inputs, which the
+    baked-geometry test fixtures didn't catch.
+
+    The fixture intentionally avoids any chance of name-based pairing (the
+    assembly-style STEP files don't preserve component names through the round-
+    trip, and XCAF's auto-generated label names can spuriously collide between
+    versions). v2 contains a single, signature-distinct filler so v1's target
+    falls all the way through to the REMOVED bucket."""
+    target_box = box_at(20, 20, 20)  # 20×20×20 at origin (master)
+    filler_box = box_at(3, 3, 3)     # tiny cube — completely different signature
+
+    v1 = tmp_path / "v1.step"
+    v2 = tmp_path / "v2.step"
+    make_assembly_step(v1, [("Target", target_box, loc_translate(50, 0, 0))])
+    make_step(v2, [("Filler", filler_box)])
+
+    parts_v1 = load_parts(v1)
+    parts_v2 = load_parts(v2)
+    assert len(parts_v1) == 1 and len(parts_v2) == 1
+
+    target_v1 = parts_v1[0]
+    # Sanity: the assembly-style v1 reports the target's world-space centroid as
+    # the center of a 20³ box at origin (50,0,0) → (60, 10, 10).
+    assert target_v1.centroid == pytest.approx([60.0, 10.0, 10.0], abs=1e-6)
+
+    result = diff_parts(parts_v1, parts_v2)
+    # Must have produced a REMOVED entry for the target.
+    removed = [e for e in result.entries if e.status == Status.REMOVED]
+    assert len(removed) == 1, f"expected 1 REMOVED entry, got {len(removed)}"
+
+    out_step = tmp_path / "diff.step"
+    write_diff(result, out_step)
+
+    parts_diff = load_parts(out_step)
+    removed_in_diff = next(p for p in parts_diff if "REMOVED" in p.name)
+
+    assert removed_in_diff.centroid == pytest.approx(target_v1.centroid, abs=1e-6), (
+        f"Removed-part centroid {removed_in_diff.centroid} should match v1 centroid "
+        f"{target_v1.centroid}. The L² bake bug would yield ~(110, 10, 10)."
+    )
+
+
+def test_rotation_invariant_to_representation(tmp_path: Path):
+    """Regression: a part rotated 90° around Z is reported as UNCHANGED whether the
+    rotation lives in v1's TopLoc_Location or v2's baked geometry. The previous
+    matcher compared XCAF transform rotation blocks and would flag this case as
+    MOVED, since v1's transform = R90 but v2's transform = identity.
+
+    90° was chosen because it permutes the box's AABB dimensions (40×10×5 →
+    10×40×5) without changing the *sorted* dimensions, so the signature-based
+    matcher still pairs the two parts. A 30° rotation would grow the AABB and
+    the parts would fail to pair via signature."""
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    import math
+    from OCP.gp import gp_Trsf, gp_Ax1, gp_Pnt, gp_Dir
+
+    # 40x10x5 cuboid is asymmetric (3 distinct principal moments) so its inertia
+    # frame is well-defined — the test wouldn't be meaningful for a cube.
+    box = box_at(40, 10, 5)
+
+    # v1: rotation stored as the component's TopLoc_Location.
+    v1 = tmp_path / "v1.step"
+    make_assembly_step(v1, [("Bar", box, loc_rotate_z(90.0))])
+
+    # v2: same physical pose, but rotation baked into geometry as a flat free shape.
+    rot = gp_Trsf()
+    rot.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), math.radians(90.0))
+    box_rotated = BRepBuilderAPI_Transform(box, rot, True).Shape()
+    v2 = tmp_path / "v2.step"
+    make_step(v2, [("Bar", box_rotated)])
+
+    parts_v1 = load_parts(v1)
+    parts_v2 = load_parts(v2)
+    assert len(parts_v1) == 1 and len(parts_v2) == 1, (
+        f"expected 1 part each; got v1={len(parts_v1)}, v2={len(parts_v2)}"
+    )
+    # Sanity: same world-space pose → same centroid.
+    assert parts_v1[0].centroid == pytest.approx(parts_v2[0].centroid, abs=1e-6)
+
+    result = diff_parts(parts_v1, parts_v2)
+    assert len(result.entries) == 1
+    entry = result.entries[0]
+    assert entry.status == Status.UNCHANGED, (
+        f"Expected UNCHANGED but got {entry.status} "
+        f"(delta_mm={entry.delta_mm}, delta_deg={entry.delta_deg}). "
+        "If delta_deg is ~90, the matcher is comparing XCAF transforms again "
+        "instead of world-space inertia orientations."
     )
 
 

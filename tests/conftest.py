@@ -42,3 +42,70 @@ def box_at(size_x: float, size_y: float, size_z: float, x: float = 0.0, y: float
     trsf = gp_Trsf()
     trsf.SetTranslation(gp_Vec(x, y, z))
     return BRepBuilderAPI_Transform(box, trsf, True).Shape()
+
+
+def loc_translate(x: float, y: float, z: float):
+    """Build a TopLoc_Location for a pure translation."""
+    from OCP.TopLoc import TopLoc_Location
+    from OCP.gp import gp_Trsf, gp_Vec
+    trsf = gp_Trsf()
+    trsf.SetTranslation(gp_Vec(x, y, z))
+    return TopLoc_Location(trsf)
+
+
+def loc_rotate_z(angle_deg: float):
+    """Build a TopLoc_Location for a rotation around the Z axis through the origin."""
+    import math
+    from OCP.TopLoc import TopLoc_Location
+    from OCP.gp import gp_Trsf, gp_Ax1, gp_Pnt, gp_Dir
+    trsf = gp_Trsf()
+    trsf.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), math.radians(angle_deg))
+    return TopLoc_Location(trsf)
+
+
+def make_assembly_step(path: Path, parts) -> None:
+    """Write a STEP file as an XCAF assembly: each part is a *component* whose pose
+    lives in a TopLoc_Location, not in baked geometry. This is what real CAD-exported
+    STEP files look like, and it exercises the reader's parent_loc → located-shape
+    path that flat free-shape STEP files (the `make_step` fixture) don't.
+
+    `parts` is an iterable of (name, master_shape, location) tuples. Names are not
+    preserved through the STEP round-trip in this construction (XCAF auto-generates
+    component labels of the form "=>[0:1:1:N]"), so tests should match parts by
+    signature or centroid rather than by name.
+    """
+    from OCP.TDocStd import TDocStd_Document
+    from OCP.TCollection import TCollection_ExtendedString
+    from OCP.XCAFApp import XCAFApp_Application
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool
+    from OCP.TDataStd import TDataStd_Name
+    from OCP.STEPCAFControl import STEPCAFControl_Writer
+    from OCP.STEPControl import STEPControl_AsIs
+    from OCP.IFSelect import IFSelect_RetDone
+    from OCP.TopoDS import TopoDS_Compound
+    from OCP.BRep import BRep_Builder
+
+    # Build a compound containing each master shape positioned via .Located(loc).
+    # XCAF will recognise the subshapes as components when AddShape(..., True) is
+    # called, producing a real assembly hierarchy in the STEP file.
+    builder = BRep_Builder()
+    asm = TopoDS_Compound()
+    builder.MakeCompound(asm)
+    for _name, master_shape, loc in parts:
+        builder.Add(asm, master_shape.Located(loc))
+
+    app = XCAFApp_Application.GetApplication_s()
+    doc = TDocStd_Document(TCollection_ExtendedString("MDTV-XCAF"))
+    app.NewDocument(TCollection_ExtendedString("MDTV-XCAF"), doc)
+    shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+
+    asm_label = shape_tool.AddShape(asm, True)  # makeAssembly=True
+    TDataStd_Name.Set_s(asm_label, TCollection_ExtendedString("RootAssembly"))
+    shape_tool.UpdateAssemblies()
+
+    writer = STEPCAFControl_Writer()
+    writer.SetColorMode(True)
+    writer.SetNameMode(True)
+    assert writer.Transfer(doc, STEPControl_AsIs)
+    status = writer.Write(str(path))
+    assert status == IFSelect_RetDone, f"STEP write failed: {status}"
