@@ -66,6 +66,23 @@ def _label_color(label) -> Optional[tuple[float, float, float]]:
     return None
 
 
+def _shape_color(color_tool, shape) -> Optional[tuple[float, float, float]]:
+    """Return the RGB color attached to a `TopoDS_Shape`, or None if no color is set.
+
+    Needed in addition to `_label_color` because the STEPCAFControl_Reader sometimes
+    distributes a colored compound's color across its sub-shapes rather than keeping
+    it on the leaf label. After such a round-trip the leaf label has no color but
+    each constituent solid does — accessible only through this shape-based overload.
+    """
+    from OCP.Quantity import Quantity_Color
+    from OCP.XCAFDoc import XCAFDoc_ColorSurf, XCAFDoc_ColorGen
+    col = Quantity_Color()
+    for ctype in (XCAFDoc_ColorSurf, XCAFDoc_ColorGen):
+        if color_tool.GetColor(shape, ctype, col):
+            return (float(col.Red()), float(col.Green()), float(col.Blue()))
+    return None
+
+
 def _location_to_matrix(loc) -> np.ndarray:
     """Convert TopLoc_Location to a numpy 4x4 matrix."""
     trsf = loc.Transformation()
@@ -118,6 +135,63 @@ def _orientation_from_inertia(vprops) -> tuple[Optional[np.ndarray], bool]:
     return R, axisymmetric
 
 
+def _iter_solid_subshapes(shape, world_loc):
+    """Walk a leaf shape's geometry tree and yield `(bare_master, world_location)`
+    for each individuatable physical sub-part.
+
+    Why this exists: many CAD apps export "batched" components — for example, an
+    electronics tool may pack 147 screws into a single XCAF leaf whose shape is a
+    `TopoDS_Compound`. Without splitting, the matcher sees ONE Part whose centroid
+    is the average of all 147 screws; moving any single screw shifts that average
+    and the entire batch lights up as MOVED. Splitting the compound into its
+    constituent solids lets the matcher reason at the screw level.
+
+    Strategy:
+      - If `shape` is a non-compound (typically a SOLID), yield it as one part.
+      - If `shape` is a compound, recurse via `TopoDS_Iterator`, accumulating
+        location through each level.
+      - From the recursive yield, return only solids (preferred). If no solids
+        exist, fall back to shells (sheet bodies). If neither, return the whole
+        input as a single part (handles wireframe-only or degenerate cases).
+
+    Locations are composed manually rather than using `TopExp_Explorer`'s
+    `.Current()` (whose location semantics across OCCT versions are subtle):
+    every level multiplies the running `world_loc` by that subshape's intrinsic
+    location. The yielded master has its location stripped to identity so
+    callers can compute pose-invariant signatures on it.
+    """
+    from OCP.TopAbs import TopAbs_COMPOUND, TopAbs_SOLID, TopAbs_SHELL
+    from OCP.TopoDS import TopoDS_Iterator
+    from OCP.TopLoc import TopLoc_Location
+
+    def _walk(s, here_loc):
+        intrinsic = s.Location()
+        composed = here_loc.Multiplied(intrinsic)
+        if s.ShapeType() == TopAbs_COMPOUND:
+            it = TopoDS_Iterator(s)
+            while it.More():
+                yield from _walk(it.Value(), composed)
+                it.Next()
+        else:
+            master = s.Located(TopLoc_Location())
+            yield master, composed
+
+    candidates = list(_walk(shape, world_loc))
+    if not candidates:
+        return []
+
+    solids = [(m, l) for m, l in candidates if m.ShapeType() == TopAbs_SOLID]
+    if solids:
+        return solids
+    shells = [(m, l) for m, l in candidates if m.ShapeType() == TopAbs_SHELL]
+    if shells:
+        return shells
+    # Fallback: treat the whole input shape as one part (preserves prior behavior
+    # for unusual leaves like wires or compounds that contain only helper geometry).
+    intrinsic = shape.Location()
+    return [(shape.Located(TopLoc_Location()), world_loc.Multiplied(intrinsic))]
+
+
 def _read_doc(step_path: Path):
     from OCP.STEPCAFControl import STEPCAFControl_Reader
     from OCP.TDocStd import TDocStd_Document
@@ -150,6 +224,7 @@ def load_parts(step_path: str | Path) -> list[Part]:
     path = Path(step_path)
     doc = _read_doc(path)
     shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+    color_tool = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
 
     parts: list[Part] = []
 
@@ -177,42 +252,53 @@ def load_parts(step_path: str | Path) -> list[Part]:
             shape = XCAFDoc_ShapeTool.GetShape_s(label)
             if shape.IsNull():
                 return
-            located = shape.Located(parent_loc)
-            # The path-style name_prefix already identifies this leaf via the chain
-            # of component names that led here. Don't re-append the master shape's
-            # name (would produce "A/A" for free-leaf STEP exports).
-            full_name = name_prefix or _label_name(label) or "<unnamed>"
-            # Compute the signature on the master shape (no assembly transform applied)
-            # so AABB dims stay stable when the same part appears in different poses.
-            sig = compute_signature(shape)
-            # Compute world-space centroid from the located shape so movement is detected
-            # regardless of whether the position is encoded as an XCAF transform or baked
-            # into the geometry coordinates.
+            # Split compound leaves into individual solids. Some CAD tools (notably
+            # ECAD packages) export many discrete components as a single batched
+            # shape (e.g. all 147 screws under one "component_screw_147" leaf).
+            # Without this split each batch becomes one Part whose centroid is the
+            # batch average — moving one screw would re-color the entire batch.
+            sub_iter = _iter_solid_subshapes(shape, parent_loc)
+            base_name = name_prefix or _label_name(label) or "<unnamed>"
+            n_subs = len(sub_iter)
+
             from OCP.BRepGProp import BRepGProp
             from OCP.GProp import GProp_GProps
-            vprops = GProp_GProps()
-            BRepGProp.VolumeProperties_s(located, vprops)
-            com = vprops.CentreOfMass()
-            centroid = np.array([com.X(), com.Y(), com.Z()], dtype=float)
 
-            # Derive a world-space orientation from the principal axes of inertia.
-            # Unlike the XCAF transform, this is intrinsic to the located geometry,
-            # so it gives the same answer whether v1 stores rotation as a transform
-            # and v2 bakes it into geometry (or vice versa).
-            orientation, axisymmetric = _orientation_from_inertia(vprops)
+            for idx, (sub_master, sub_world_loc) in enumerate(sub_iter):
+                if sub_master.IsNull():
+                    continue
+                # Color resolution for split sub-parts: STEPCAFControl_Reader often
+                # distributes a colored compound's color onto its sub-shapes rather
+                # than the leaf label. Try the sub-shape directly first, then fall
+                # back to whatever color the label / parent supplied.
+                sub_color = _shape_color(color_tool, sub_master) or label_color
+                # Signature on the bare master so it is pose-invariant.
+                sig = compute_signature(sub_master)
+                located = sub_master.Located(sub_world_loc)
+                # Centroid + inertia in world space so movement and orientation are
+                # detected regardless of how the pose is encoded (transform vs baked).
+                vprops = GProp_GProps()
+                BRepGProp.VolumeProperties_s(located, vprops)
+                com = vprops.CentreOfMass()
+                centroid = np.array([com.X(), com.Y(), com.Z()], dtype=float)
+                orientation, axisymmetric = _orientation_from_inertia(vprops)
 
-            parts.append(
-                Part(
-                    name=full_name,
-                    shape=located,
-                    transform=_location_to_matrix(parent_loc),
-                    signature=sig,
-                    centroid=centroid,
-                    orientation=orientation,
-                    axisymmetric=axisymmetric,
-                    color=label_color,
+                # Append [idx] only when we actually split — single-solid leaves keep
+                # their original name unchanged, matching the previous behavior.
+                full_name = f"{base_name}[{idx}]" if n_subs > 1 else base_name
+
+                parts.append(
+                    Part(
+                        name=full_name,
+                        shape=located,
+                        transform=_location_to_matrix(sub_world_loc),
+                        signature=sig,
+                        centroid=centroid,
+                        orientation=orientation,
+                        axisymmetric=axisymmetric,
+                        color=sub_color,
+                    )
                 )
-            )
 
     free_labels = TDF_LabelSequence()
     shape_tool.GetFreeShapes(free_labels)

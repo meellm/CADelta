@@ -9,7 +9,7 @@ from cadelta.matcher import Status, diff_parts
 from cadelta.reader import load_parts
 from cadelta.writer import COLOR_BY_STATUS, write_diff
 
-from .conftest import box_at, loc_rotate_z, loc_translate, make_assembly_step, make_step
+from .conftest import box_at, boxes_compound, loc_rotate_z, loc_translate, make_assembly_step, make_step
 
 
 @pytest.fixture
@@ -225,6 +225,153 @@ def test_rotation_invariant_to_representation(tmp_path: Path):
         "If delta_deg is ~90, the matcher is comparing XCAF transforms again "
         "instead of world-space inertia orientations."
     )
+
+
+def test_compound_leaf_split_into_individual_parts(tmp_path: Path):
+    """A leaf shape that's a TopoDS_Compound packing N solids must split into N
+    individual Parts so that moving one of them lights up only that one — not the
+    whole batch. Mirrors the "ECAD exports 147 screws as one component" pattern.
+
+    Without splitting, the matcher would see ONE Part per side with a centroid
+    that's the average of all 5 boxes; moving the middle box would shift that
+    average and report the entire compound as MOVED, defeating the visual diff."""
+    positions_v1 = [(0, 0, 0), (20, 0, 0), (40, 0, 0), (60, 0, 0), (80, 0, 0)]
+    # The middle box moves +50 mm in Y; the other four stay put.
+    positions_v2 = [(0, 0, 0), (20, 0, 0), (40, 50, 0), (60, 0, 0), (80, 0, 0)]
+
+    v1 = tmp_path / "v1.step"
+    v2 = tmp_path / "v2.step"
+    make_step(v1, [("Batch", boxes_compound(positions_v1))])
+    make_step(v2, [("Batch", boxes_compound(positions_v2))])
+
+    parts_v1 = load_parts(v1)
+    parts_v2 = load_parts(v2)
+    assert len(parts_v1) == 5, f"compound leaf should split into 5 parts, got {len(parts_v1)}"
+    assert len(parts_v2) == 5
+
+    result = diff_parts(parts_v1, parts_v2)
+    counts = {s: len(result.by_status(s)) for s in Status}
+    assert counts == {
+        Status.UNCHANGED: 4,
+        Status.MOVED: 1,
+        Status.ADDED: 0,
+        Status.REMOVED: 0,
+    }, f"expected 4 unchanged + 1 moved, got {counts}"
+
+    moved = result.by_status(Status.MOVED)[0]
+    assert moved.delta_mm == pytest.approx(50.0, abs=1e-3), (
+        f"the one moved box should report ~50mm delta, got {moved.delta_mm}"
+    )
+
+
+def test_compound_leaf_handles_added_and_removed_subshapes(tmp_path: Path):
+    """A compound leaf where one sub-solid is removed and another is added
+    between v1 and v2 should report exactly one REMOVED and one ADDED entry —
+    not the whole batch as MOVED. Sub-solids must have signature-distinct
+    sizes so the matcher can tell which one is which."""
+    # Cubes of distinct sizes so each sub-solid has a unique signature.
+    # v1 has cubes A(5), B(7), C(9); v2 keeps A and C, drops B, adds D(11).
+    from .conftest import box_at
+    from OCP.TopoDS import TopoDS_Compound
+    from OCP.BRep import BRep_Builder
+
+    def cmp_of(parts):
+        builder = BRep_Builder()
+        c = TopoDS_Compound()
+        builder.MakeCompound(c)
+        for s, x in parts:
+            builder.Add(c, box_at(s, s, s, x, 0, 0))
+        return c
+
+    v1 = tmp_path / "v1.step"
+    v2 = tmp_path / "v2.step"
+    make_step(v1, [("Bag", cmp_of([(5, 0), (7, 30), (9, 60)]))])
+    make_step(v2, [("Bag", cmp_of([(5, 0), (9, 60), (11, 90)]))])
+
+    parts_v1 = load_parts(v1)
+    parts_v2 = load_parts(v2)
+    assert len(parts_v1) == 3
+    assert len(parts_v2) == 3
+
+    result = diff_parts(parts_v1, parts_v2)
+    counts = {s: len(result.by_status(s)) for s in Status}
+    assert counts == {
+        Status.UNCHANGED: 2,
+        Status.MOVED: 0,
+        Status.ADDED: 1,
+        Status.REMOVED: 1,
+    }, f"expected 2 unchanged + 1 added + 1 removed, got {counts}"
+
+
+def test_compound_leaf_split_with_color_preservation(tmp_path: Path):
+    """When a compound leaf carries a single XCAF color, every split sub-part
+    must inherit that color so the diff.step doesn't lose visual identity for
+    batched components."""
+    from .conftest import box_at
+    from OCP.TopoDS import TopoDS_Compound
+    from OCP.BRep import BRep_Builder
+
+    builder = BRep_Builder()
+    cmp = TopoDS_Compound()
+    builder.MakeCompound(cmp)
+    for x in (0.0, 30.0, 60.0):
+        builder.Add(cmp, box_at(10, 10, 10, x, 0, 0))
+
+    teal = (0.10, 0.55, 0.65)
+    v1 = tmp_path / "v1.step"
+    v2 = tmp_path / "v2.step"
+    make_step(v1, [("Triplet", cmp, teal)])
+    make_step(v2, [("Triplet", cmp, teal)])
+
+    parts_v1 = load_parts(v1)
+    assert len(parts_v1) == 3
+    for p in parts_v1:
+        assert p.color is not None, "split sub-part lost its inherited color"
+        for got, want in zip(p.color, teal):
+            assert abs(got - want) < 0.01
+
+    # End-to-end: nothing changed → all UNCHANGED → all keep teal in diff.step
+    result = diff_parts(parts_v1, load_parts(v2))
+    assert all(e.status == Status.UNCHANGED for e in result.entries)
+    out = tmp_path / "diff.step"
+    write_diff(result, out)
+    diff_parts_loaded = load_parts(out)
+    assert len(diff_parts_loaded) == 3
+    for p in diff_parts_loaded:
+        for got, want in zip(p.color, teal):
+            assert abs(got - want) < 0.02
+
+
+def test_nested_compound_flattens_to_solids(tmp_path: Path):
+    """A compound containing other compounds (containing solids) should still
+    flatten to one Part per solid — the splitter must recurse, not stop at the
+    first compound boundary."""
+    from .conftest import box_at
+    from OCP.TopoDS import TopoDS_Compound
+    from OCP.BRep import BRep_Builder
+
+    builder = BRep_Builder()
+    inner_a = TopoDS_Compound()
+    builder.MakeCompound(inner_a)
+    builder.Add(inner_a, box_at(10, 10, 10, 0, 0, 0))
+    builder.Add(inner_a, box_at(10, 10, 10, 20, 0, 0))
+
+    inner_b = TopoDS_Compound()
+    builder.MakeCompound(inner_b)
+    builder.Add(inner_b, box_at(10, 10, 10, 40, 0, 0))
+
+    outer = TopoDS_Compound()
+    builder.MakeCompound(outer)
+    builder.Add(outer, inner_a)
+    builder.Add(outer, inner_b)
+
+    step = tmp_path / "nested.step"
+    make_step(step, [("Nested", outer)])
+
+    parts = load_parts(step)
+    assert len(parts) == 3, f"nested compound should flatten to 3 solids, got {len(parts)}"
+    centroids = sorted(tuple(round(c, 3) for c in p.centroid) for p in parts)
+    assert centroids == [(5.0, 5.0, 5.0), (25.0, 5.0, 5.0), (45.0, 5.0, 5.0)]
 
 
 def test_unchanged_part_preserves_v2_color(tmp_path: Path):

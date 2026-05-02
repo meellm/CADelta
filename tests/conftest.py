@@ -61,6 +61,20 @@ def box_at(size_x: float, size_y: float, size_z: float, x: float = 0.0, y: float
     return BRepBuilderAPI_Transform(box, trsf, True).Shape()
 
 
+def boxes_compound(positions, size: float = 10.0):
+    """Return a TopoDS_Compound packing one axis-aligned box at each `(x, y, z)`
+    position. Models the "ECAD exports 147 screws as one batched component"
+    pattern: a single XCAF leaf whose shape contains many discrete solids."""
+    from OCP.TopoDS import TopoDS_Compound
+    from OCP.BRep import BRep_Builder
+    builder = BRep_Builder()
+    compound = TopoDS_Compound()
+    builder.MakeCompound(compound)
+    for x, y, z in positions:
+        builder.Add(compound, box_at(size, size, size, x, y, z))
+    return compound
+
+
 def loc_translate(x: float, y: float, z: float):
     """Build a TopLoc_Location for a pure translation."""
     from OCP.TopLoc import TopLoc_Location
