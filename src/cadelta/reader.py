@@ -26,6 +26,10 @@ class Part:
     # Rotation cannot be reliably detected for such parts, and visually it usually
     # cannot be perceived either.
     axisymmetric: bool = False
+    # Original RGB surface color stored on the part's XCAF label (or inherited from a
+    # parent component / master shape). `None` means the source STEP did not assign a
+    # color, in which case the writer falls back to the gray UNCHANGED default.
+    color: Optional[tuple[float, float, float]] = None
 
     def __post_init__(self):
         # If no explicit centroid is provided (e.g. synthetic test parts), derive it
@@ -42,6 +46,23 @@ def _label_name(label) -> Optional[str]:
             return attr.Get().ToExtString()
         except Exception:
             return None
+    return None
+
+
+def _label_color(label) -> Optional[tuple[float, float, float]]:
+    """Return the RGB color attached to an XCAF label, trying surface and generic
+    color attributes in turn. Returns None when the label has no color attribute set
+    (the caller should then inherit from the parent or fall back to a default).
+
+    Uses the static `GetColor_s(label, type, color) -> bool` overload — the instance
+    method `XCAFDoc_ColorTool.GetColor` only accepts a `TopoDS_Shape`, not a label.
+    """
+    from OCP.Quantity import Quantity_Color
+    from OCP.XCAFDoc import XCAFDoc_ColorTool, XCAFDoc_ColorSurf, XCAFDoc_ColorGen
+    col = Quantity_Color()
+    for ctype in (XCAFDoc_ColorSurf, XCAFDoc_ColorGen):
+        if XCAFDoc_ColorTool.GetColor_s(label, ctype, col):
+            return (float(col.Red()), float(col.Green()), float(col.Blue()))
     return None
 
 
@@ -132,7 +153,12 @@ def load_parts(step_path: str | Path) -> list[Part]:
 
     parts: list[Part] = []
 
-    def walk(label, parent_loc: "TopLoc_Location", name_prefix: str):
+    def walk(label, parent_loc: "TopLoc_Location", name_prefix: str,
+             parent_color: Optional[tuple[float, float, float]]):
+        # XCAF color inheritance: a color set directly on the label wins; otherwise
+        # the part inherits whatever color came from the assembly chain above it.
+        label_color = _label_color(label) or parent_color
+
         if XCAFDoc_ShapeTool.IsAssembly_s(label):
             comps = TDF_LabelSequence()
             XCAFDoc_ShapeTool.GetComponents_s(label, comps)
@@ -144,7 +170,9 @@ def load_parts(step_path: str | Path) -> list[Part]:
                     world_loc = parent_loc.Multiplied(comp_loc)
                     comp_name = _label_name(comp) or _label_name(ref) or ""
                     child_prefix = f"{name_prefix}/{comp_name}" if name_prefix else comp_name
-                    walk(ref, world_loc, child_prefix)
+                    # Component-level color overrides assembly color for that instance.
+                    comp_color = _label_color(comp) or label_color
+                    walk(ref, world_loc, child_prefix, comp_color)
         else:
             shape = XCAFDoc_ShapeTool.GetShape_s(label)
             if shape.IsNull():
@@ -182,6 +210,7 @@ def load_parts(step_path: str | Path) -> list[Part]:
                     centroid=centroid,
                     orientation=orientation,
                     axisymmetric=axisymmetric,
+                    color=label_color,
                 )
             )
 
@@ -191,6 +220,6 @@ def load_parts(step_path: str | Path) -> list[Part]:
     for i in range(1, free_labels.Length() + 1):
         root = free_labels.Value(i)
         root_name = _label_name(root) or ""
-        walk(root, identity, root_name)
+        walk(root, identity, root_name, parent_color=None)
 
     return parts

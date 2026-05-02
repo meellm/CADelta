@@ -227,6 +227,49 @@ def test_rotation_invariant_to_representation(tmp_path: Path):
     )
 
 
+def test_unchanged_part_preserves_v2_color(tmp_path: Path):
+    """A part that's identical between v1 and v2 should appear in diff.step with
+    its ORIGINAL v2 color, not the gray UNCHANGED fallback. ADDED/MOVED parts
+    still get their status color (cyan/pink)."""
+    from cadelta.writer import COLOR_BY_STATUS
+
+    # Both v1 and v2 carry an unchanged 20³ box; v2 colors it teal. v2 also
+    # introduces an added 8³ box that should come out cyan.
+    teal = (0.10, 0.55, 0.65)
+    v1 = tmp_path / "v1.step"
+    v2 = tmp_path / "v2.step"
+    make_step(v1, [("Box", box_at(20, 20, 20))])
+    make_step(v2, [
+        ("Box", box_at(20, 20, 20), teal),
+        ("Newcomer", box_at(8, 8, 8, 100, 0, 0), (0.5, 0.5, 0.5)),  # any color; ADDED overrides
+    ])
+
+    parts_v1 = load_parts(v1)
+    parts_v2 = load_parts(v2)
+    result = diff_parts(parts_v1, parts_v2)
+    out = tmp_path / "diff.step"
+    write_diff(result, out)
+
+    parts_diff = load_parts(out)
+    assert len(parts_diff) == 2
+
+    unchanged = next(p for p in parts_diff if "UNCHANGED" in p.name)
+    added = next(p for p in parts_diff if "ADDED" in p.name)
+
+    assert unchanged.color is not None, "unchanged part lost its color attribute"
+    for got, want in zip(unchanged.color, teal):
+        assert abs(got - want) < 0.01, (
+            f"unchanged part should keep v2's teal {teal}; got {unchanged.color}"
+        )
+
+    expected_added = COLOR_BY_STATUS[Status.ADDED]
+    assert added.color is not None
+    for got, want in zip(added.color, expected_added):
+        assert abs(got - want) < 0.01, (
+            f"added part should be cyan {expected_added}; got {added.color}"
+        )
+
+
 def test_cli_help_runs():
     """Smoke-test the CLI entrypoint."""
     from click.testing import CliRunner

@@ -30,10 +30,10 @@ def main(v1: Path, v2: Path, output: Path, gltf: Path | None,
 
     Coloring of the resulting model:
 
-      green  = added   (in V2 only)
-      yellow = moved   (in both, pose differs beyond tolerance)
+      cyan   = added   (in V2 only)
+      pink   = moved   (in both, pose differs beyond tolerance)
       red    = removed (in V1 only; rendered at its original V1 position)
-      gray   = unchanged
+      orig.  = unchanged (keeps the V2 part's original color; gray fallback)
     """
     click.echo(f"Reading {v1} ...", err=True)
     parts_v1 = load_parts(v1)

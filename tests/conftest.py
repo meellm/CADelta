@@ -5,27 +5,44 @@ from pathlib import Path
 from typing import Iterable, Tuple
 
 
-def make_step(path: Path, parts: Iterable[Tuple[str, object]]) -> None:
-    """Write a STEP file containing the given (name, shape) pairs as free shapes."""
+def make_step(path: Path, parts: Iterable[Tuple]) -> None:
+    """Write a STEP file containing the given parts as free shapes.
+
+    Each entry in `parts` is either:
+      (name, shape)              — uncolored
+      (name, shape, (r, g, b))   — surface-colored via XCAFDoc_ColorSurf
+    """
     from OCP.TDocStd import TDocStd_Document
     from OCP.TCollection import TCollection_ExtendedString
     from OCP.XCAFApp import XCAFApp_Application
-    from OCP.XCAFDoc import XCAFDoc_DocumentTool
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ColorSurf
     from OCP.TDataStd import TDataStd_Name
     from OCP.STEPCAFControl import STEPCAFControl_Writer
     from OCP.STEPControl import STEPControl_AsIs
     from OCP.IFSelect import IFSelect_RetDone
+    from OCP.Quantity import Quantity_Color, Quantity_TOC_RGB
 
     app = XCAFApp_Application.GetApplication_s()
     doc = TDocStd_Document(TCollection_ExtendedString("MDTV-XCAF"))
     app.NewDocument(TCollection_ExtendedString("MDTV-XCAF"), doc)
     shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+    color_tool = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
 
-    for name, shape in parts:
+    for entry in parts:
+        if len(entry) == 2:
+            name, shape = entry
+            rgb = None
+        else:
+            name, shape, rgb = entry
         label = shape_tool.AddShape(shape, False)
         TDataStd_Name.Set_s(label, TCollection_ExtendedString(name))
+        if rgb is not None:
+            qcolor = Quantity_Color(rgb[0], rgb[1], rgb[2], Quantity_TOC_RGB)
+            color_tool.SetColor(label, qcolor, XCAFDoc_ColorSurf)
 
     writer = STEPCAFControl_Writer()
+    writer.SetColorMode(True)
+    writer.SetNameMode(True)
     assert writer.Transfer(doc, STEPControl_AsIs)
     status = writer.Write(str(path))
     assert status == IFSelect_RetDone, f"STEP write failed: {status}"

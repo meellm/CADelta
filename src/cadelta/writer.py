@@ -6,12 +6,14 @@ from typing import Optional
 from .matcher import DiffEntry, DiffResult, Status
 from .reader import Part
 
-# RGB triplets in 0..1
+# RGB triplets in 0..1.
+# UNCHANGED parts use whatever color the source v2 STEP assigned to them; this entry
+# is the gray fallback applied only when the v2 part has no color attribute set.
 COLOR_BY_STATUS = {
-    Status.ADDED: (0.20, 0.80, 0.20),      # green
-    Status.MOVED: (1.00, 0.85, 0.00),      # yellow
+    Status.ADDED: (0.00, 0.80, 0.95),      # cyan
+    Status.MOVED: (1.00, 0.45, 0.75),      # pink
     Status.REMOVED: (0.90, 0.15, 0.15),    # red
-    Status.UNCHANGED: (0.60, 0.60, 0.60),  # gray
+    Status.UNCHANGED: (0.60, 0.60, 0.60),  # gray (fallback only)
 }
 
 def _new_doc():
@@ -109,7 +111,13 @@ def write_diff(
         }[entry.status]
         display_name = f"[{status_tag}] {part.name}" if part.name else f"[{status_tag}]"
         _set_name(label, display_name)
-        qcolor = _quantity_color(COLOR_BY_STATUS[entry.status])
+        # UNCHANGED parts keep their original v2 color so the output reads like v2 with
+        # cyan/pink overlays for changes; ADDED and MOVED override with their status hue.
+        if entry.status == Status.UNCHANGED and part.color is not None:
+            rgb = part.color
+        else:
+            rgb = COLOR_BY_STATUS[entry.status]
+        qcolor = _quantity_color(rgb)
         color_tool.SetColor(label, qcolor, XCAFDoc_ColorSurf)
         color_tool.SetColor(label, qcolor, XCAFDoc_ColorGen)
 
