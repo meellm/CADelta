@@ -7,9 +7,9 @@ Compare two versions of a mechanical assembly and see — in a single colored ou
 ## Features
 
 - 🩵 **Cyan** — parts added in v2
-- 💗 **Pink** — parts moved (translation > 0.01 mm or rotation > 0.01°)
-- 🔴 **Red** — parts removed (rendered in place at their original v1 position so you can see exactly what was lost where)
-- 🎨 **Original** — unchanged parts keep whatever color v2 had assigned to them, so the output reads like v2 with cyan/pink/red overlays for the changes (gray fallback when v2 has no color set)
+- 💖 **Hot pink** — parts moved (rendered at their NEW v2 position, in high-contrast pink) — paired with a softer pink ghost rendered at the OLD v1 position so you can trace the movement
+- 🔴 **Bright red** — parts removed (rendered in place at their original v1 position so you can see exactly what was lost where)
+- 🎨 **Original** — unchanged parts keep whatever color v2 had assigned to them, so the output reads like v2 with the change overlays popping out (gray fallback when v2 has no color set)
 - Smart matching — pairs parts by geometry signature (volume, surface area, sorted bounding-box, face count) and world-space centroid, so renames, re-exports, and STEP entity renumbering don't trigger spurious diffs.
 - Centroid-based movement detection — works whether position is encoded as an XCAF transform or baked into geometry coordinates.
 - Multiple outputs — colored STEP for your CAD app, GLB for any browser glTF viewer, JSON report for scripting.
@@ -42,8 +42,8 @@ Open `diff.step` in your CAD application, or drag `diff.glb` into a glTF viewer 
 | Color     | Status    | Triggers when…                                                                                              |
 |-----------|-----------|-------------------------------------------------------------------------------------------------------------|
 | 🩵 Cyan   | added     | A part exists in v2 but not in v1.                                                                          |
-| 💗 Pink   | moved     | A part exists in both, but its world-space center moved > 0.01 mm or rotated > 0.01°.                       |
-| 🔴 Red    | removed   | A part exists in v1 but not in v2. Rendered at its original v1 world-space position so the loss is visible in context. |
+| 💖 Hot pink + soft pink ghost | moved | A part exists in both, but its world-space center moved > 0.01 mm or rotated > 0.01°. Hot pink at the new v2 position, soft pink at the old v1 position. |
+| 🔴 Bright red | removed | A part exists in v1 but not in v2. Rendered at its original v1 world-space position so the loss is visible in context. |
 | 🎨 Original | unchanged | Matching geometry and same pose. Keeps the original v2 color (gray fallback if none was set).             |
 
 ## 📋 Commands

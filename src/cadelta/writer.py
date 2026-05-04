@@ -11,10 +11,17 @@ from .reader import Part
 # is the gray fallback applied only when the v2 part has no color attribute set.
 COLOR_BY_STATUS = {
     Status.ADDED: (0.00, 0.80, 0.95),      # cyan
-    Status.MOVED: (1.00, 0.45, 0.75),      # pink
-    Status.REMOVED: (0.90, 0.15, 0.15),    # red
+    Status.MOVED: (1.00, 0.05, 0.50),      # hot pink (high-contrast: the NEW position)
+    Status.REMOVED: (1.00, 0.00, 0.00),    # pure red (high-contrast)
     Status.UNCHANGED: (0.60, 0.60, 0.60),  # gray (fallback only)
 }
+
+# Ghost color rendered at the OLD (v1) position of a moved part: a softer,
+# lower-contrast pink that visually pairs with COLOR_BY_STATUS[Status.MOVED]
+# while staying clearly subordinate to it. The high-contrast pink at v2's new
+# position is what the user's eye should be drawn to; the ghost answers
+# "where did it come from?".
+COLOR_MOVED_FROM = (1.00, 0.65, 0.80)
 
 def _new_doc():
     from OCP.TDocStd import TDocStd_Document
@@ -108,6 +115,10 @@ def write_diff(
     unchanged_grouped: dict = defaultdict(list)
     v2_individuals: list = []
     v1_removed: list = []
+    # MOVED entries get rendered TWICE: once at the v2 (new) position with the
+    # high-contrast pink, and again as a softer pink ghost at the v1 (old)
+    # position so it's clear where the part came from.
+    moved_ghosts: list = []
 
     for entry in diff.entries:
         if entry.status == Status.REMOVED:
@@ -124,6 +135,10 @@ def write_diff(
             unchanged_grouped[(part.source_group, part.color)].append(entry)
         else:
             v2_individuals.append(entry)
+        if (entry.status == Status.MOVED
+                and entry.part_v1 is not None
+                and entry.part_v1.shape is not None):
+            moved_ghosts.append(entry)
 
     # A "group" with only one entry isn't worth wrapping in a compound — demote
     # those back to the individuals bucket so they render exactly as before.
@@ -177,6 +192,15 @@ def write_diff(
         baked = _bake_location(part.shape)
         display_name = f"[REMOVED] {part.name}" if part.name else "[REMOVED]"
         _emit_label(baked, display_name, COLOR_BY_STATUS[Status.REMOVED])
+
+    # --- Moved-from ghosts: render the v1 position of each moved part in soft pink ---
+    # Pairs with the high-contrast pink at the v2 position so the user can visually
+    # trace where each moved part came from.
+    for entry in moved_ghosts:
+        part = entry.part_v1
+        baked = _bake_location(part.shape)
+        display_name = f"[MOVED_FROM] {part.name}" if part.name else "[MOVED_FROM]"
+        _emit_label(baked, display_name, COLOR_MOVED_FROM)
 
     out_step = Path(out_step)
     out_step.parent.mkdir(parents=True, exist_ok=True)
