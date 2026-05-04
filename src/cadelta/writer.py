@@ -81,6 +81,7 @@ def write_diff(
     out_step: Path,
     out_gltf: Optional[Path] = None,
 ) -> None:
+    from collections import defaultdict
     from OCP.XCAFDoc import (
         XCAFDoc_DocumentTool,
         XCAFDoc_ColorSurf,
@@ -90,54 +91,92 @@ def write_diff(
     from OCP.STEPControl import STEPControl_AsIs
     from OCP.IFSelect import IFSelect_RetDone
     from OCP.Interface import Interface_Static
+    from OCP.TopoDS import TopoDS_Compound
+    from OCP.BRep import BRep_Builder
 
     doc = _new_doc()
     shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
     color_tool = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
 
-    # --- v2 parts: added / moved / unchanged ---
+    # --- Bucket entries by output strategy ---
+    # The reader splits batched compounds (e.g. "147 screws as one component") into
+    # one Part per sub-solid for matching. Re-emitting all of them as separate XCAF
+    # labels would balloon the diff.step (one STYLED_ITEM per body), so we re-merge
+    # UNCHANGED siblings that came from the same compound and share the same color
+    # back into a single compound on output. MOVED, ADDED, and REMOVED bodies stay
+    # as individuals so their per-body coloring remains visible.
+    unchanged_grouped: dict = defaultdict(list)
+    v2_individuals: list = []
+    v1_removed: list = []
+
     for entry in diff.entries:
         if entry.status == Status.REMOVED:
+            if entry.part_v1 is not None and entry.part_v1.shape is not None:
+                v1_removed.append(entry)
             continue
         part = entry.part_v2
         if part is None or part.shape is None:
             continue
+        if entry.status == Status.UNCHANGED and part.source_group is not None:
+            # Key on color too: the rare case where sub-parts of the same compound
+            # carry different colors splits into distinct merged compounds, one
+            # per color, so no per-body color is silently dropped.
+            unchanged_grouped[(part.source_group, part.color)].append(entry)
+        else:
+            v2_individuals.append(entry)
+
+    # A "group" with only one entry isn't worth wrapping in a compound — demote
+    # those back to the individuals bucket so they render exactly as before.
+    for key in list(unchanged_grouped.keys()):
+        if len(unchanged_grouped[key]) == 1:
+            v2_individuals.append(unchanged_grouped.pop(key)[0])
+
+    def _emit_label(shape, display_name: str, rgb: tuple[float, float, float]) -> None:
+        label = shape_tool.AddShape(shape, False)
+        _set_name(label, display_name)
+        qcolor = _quantity_color(rgb)
+        color_tool.SetColor(label, qcolor, XCAFDoc_ColorSurf)
+        color_tool.SetColor(label, qcolor, XCAFDoc_ColorGen)
+
+    # --- Re-merged UNCHANGED groups: one compound, one color, one label ---
+    for (_group_id, color), entries_in_group in unchanged_grouped.items():
+        builder = BRep_Builder()
+        merged = TopoDS_Compound()
+        builder.MakeCompound(merged)
+        for e in entries_in_group:
+            builder.Add(merged, _bake_location(e.part_v2.shape))
+        # Display name: drop the "[idx]" suffix the reader added so the merged
+        # compound shows as "[UNCHANGED] component_screw_147" rather than "...[0]".
+        rep_name = entries_in_group[0].part_v2.name.rsplit("[", 1)[0]
+        display_name = f"[UNCHANGED] {rep_name}" if rep_name else "[UNCHANGED]"
+        rgb = color if color is not None else COLOR_BY_STATUS[Status.UNCHANGED]
+        _emit_label(merged, display_name, rgb)
+
+    # --- Individual v2 parts: ADDED, MOVED, and solo UNCHANGED ---
+    for entry in v2_individuals:
+        part = entry.part_v2
         baked = _bake_location(part.shape)
-        label = shape_tool.AddShape(baked, False)
         status_tag = {
             Status.ADDED: "ADDED",
             Status.MOVED: "MOVED",
             Status.UNCHANGED: "UNCHANGED",
         }[entry.status]
         display_name = f"[{status_tag}] {part.name}" if part.name else f"[{status_tag}]"
-        _set_name(label, display_name)
-        # UNCHANGED parts keep their original v2 color so the output reads like v2 with
-        # cyan/pink overlays for changes; ADDED and MOVED override with their status hue.
         if entry.status == Status.UNCHANGED and part.color is not None:
             rgb = part.color
         else:
             rgb = COLOR_BY_STATUS[entry.status]
-        qcolor = _quantity_color(rgb)
-        color_tool.SetColor(label, qcolor, XCAFDoc_ColorSurf)
-        color_tool.SetColor(label, qcolor, XCAFDoc_ColorGen)
+        _emit_label(baked, display_name, rgb)
 
-    # --- removed parts: rendered in place at their original v1 world-space position ---
+    # --- Removed parts: rendered in place at their original v1 world-space position ---
     # The reader stores each part with a TopLoc_Location carrying its world transform;
     # _bake_location() flattens that into geometry so the part sits where it used to be
     # in v1. Red color distinguishes removed parts from v2 ghosts that may overlap.
-    for entry in diff.entries:
-        if entry.status != Status.REMOVED:
-            continue
+    for entry in v1_removed:
         part = entry.part_v1
-        if part is None or part.shape is None:
-            continue
         baked = _bake_location(part.shape)
-        label = shape_tool.AddShape(baked, False)
         display_name = f"[REMOVED] {part.name}" if part.name else "[REMOVED]"
-        _set_name(label, display_name)
-        qcolor = _quantity_color(COLOR_BY_STATUS[Status.REMOVED])
-        color_tool.SetColor(label, qcolor, XCAFDoc_ColorSurf)
-        color_tool.SetColor(label, qcolor, XCAFDoc_ColorGen)
+        _emit_label(baked, display_name, COLOR_BY_STATUS[Status.REMOVED])
 
     out_step = Path(out_step)
     out_step.parent.mkdir(parents=True, exist_ok=True)

@@ -374,6 +374,78 @@ def test_nested_compound_flattens_to_solids(tmp_path: Path):
     assert centroids == [(5.0, 5.0, 5.0), (25.0, 5.0, 5.0), (45.0, 5.0, 5.0)]
 
 
+def test_diff_step_regroups_unchanged_compound_subshapes(tmp_path: Path):
+    """When a compound leaf was split for matching, UNCHANGED siblings sharing the
+    same color must be re-merged into a single compound on output. Without this,
+    a 100-body batch where one body moves would balloon diff.step to 100 separate
+    XCAF labels (one STYLED_ITEM each), making the file slow to open in CAD apps.
+
+    Setup: a 5-box compound where the middle box moves +50mm.
+    Expected output topology:
+      - 1 free COMPOUND containing the 4 unchanged boxes (1 STYLED_ITEM)
+      - 1 free SOLID for the moved box (1 STYLED_ITEM)
+      = 2 free shapes total, NOT 5.
+    """
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ShapeTool
+    from OCP.TDF import TDF_LabelSequence
+    from OCP.TopAbs import TopAbs_COMPOUND, TopAbs_SOLID
+
+    positions_v1 = [(0, 0, 0), (20, 0, 0), (40, 0, 0), (60, 0, 0), (80, 0, 0)]
+    positions_v2 = [(0, 0, 0), (20, 0, 0), (40, 50, 0), (60, 0, 0), (80, 0, 0)]
+
+    teal = (0.10, 0.55, 0.65)
+    v1 = tmp_path / "v1.step"
+    v2 = tmp_path / "v2.step"
+    make_step(v1, [("Batch", boxes_compound(positions_v1), teal)])
+    make_step(v2, [("Batch", boxes_compound(positions_v2), teal)])
+
+    parts_v1 = load_parts(v1)
+    parts_v2 = load_parts(v2)
+    # Sanity: every sub-part of the same compound got the same source_group.
+    groups_v2 = {p.source_group for p in parts_v2}
+    assert len(groups_v2) == 1 and None not in groups_v2, (
+        f"all 5 sub-parts should share one source_group, got {groups_v2}"
+    )
+
+    result = diff_parts(parts_v1, parts_v2)
+    out_step = tmp_path / "diff.step"
+    write_diff(result, out_step)
+
+    # Inspect XCAF topology of the output: free shapes by type.
+    from cadelta.reader import _read_doc
+    doc = _read_doc(out_step)
+    shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+    free = TDF_LabelSequence()
+    shape_tool.GetFreeShapes(free)
+
+    from collections import Counter
+    types = Counter()
+    for i in range(1, free.Length() + 1):
+        s = XCAFDoc_ShapeTool.GetShape_s(free.Value(i))
+        types[s.ShapeType()] += 1
+    assert types == Counter({TopAbs_COMPOUND: 1, TopAbs_SOLID: 1}), (
+        f"expected 1 COMPOUND + 1 SOLID; got {dict(types)}. "
+        "If 5 SOLIDs, the writer is not regrouping the UNCHANGED siblings."
+    )
+
+    # End-to-end colors after re-load: 4 unchanged sub-parts (teal), 1 moved (pink).
+    parts_diff = load_parts(out_step)
+    assert len(parts_diff) == 5, "splitter still applies on re-load → 5 parts"
+    moved = [p for p in parts_diff if "MOVED" in p.name]
+    assert len(moved) == 1
+    pink = COLOR_BY_STATUS[Status.MOVED]
+    for got, want in zip(moved[0].color, pink):
+        assert abs(got - want) < 0.02, f"moved should be pink {pink}, got {moved[0].color}"
+    unchanged = [p for p in parts_diff if "UNCHANGED" in p.name]
+    assert len(unchanged) == 4
+    for p in unchanged:
+        assert p.color is not None, "unchanged sub-part lost color through re-merge"
+        for got, want in zip(p.color, teal):
+            assert abs(got - want) < 0.02, (
+                f"unchanged should keep teal {teal}; got {p.color}"
+            )
+
+
 def test_unchanged_part_preserves_v2_color(tmp_path: Path):
     """A part that's identical between v1 and v2 should appear in diff.step with
     its ORIGINAL v2 color, not the gray UNCHANGED fallback. ADDED/MOVED parts

@@ -30,6 +30,12 @@ class Part:
     # parent component / master shape). `None` means the source STEP did not assign a
     # color, in which case the writer falls back to the gray UNCHANGED default.
     color: Optional[tuple[float, float, float]] = None
+    # All split sub-parts that came from the same TopoDS_Compound leaf share the same
+    # `source_group` integer. The writer uses this so it can re-merge unchanged
+    # siblings back into a single compound on output (avoiding 100x label/color
+    # bloat for batched components like "147 screws as one entity"). `None` means the
+    # part stands alone — either a single-solid leaf or a synthetic test part.
+    source_group: Optional[int] = None
 
     def __post_init__(self):
         # If no explicit centroid is provided (e.g. synthetic test parts), derive it
@@ -227,6 +233,9 @@ def load_parts(step_path: str | Path) -> list[Part]:
     color_tool = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
 
     parts: list[Part] = []
+    # Mutable counter so nested walk() can assign a fresh group id whenever a
+    # multi-solid compound leaf is encountered.
+    group_counter = [0]
 
     def walk(label, parent_loc: "TopLoc_Location", name_prefix: str,
              parent_color: Optional[tuple[float, float, float]]):
@@ -260,6 +269,13 @@ def load_parts(step_path: str | Path) -> list[Part]:
             sub_iter = _iter_solid_subshapes(shape, parent_loc)
             base_name = name_prefix or _label_name(label) or "<unnamed>"
             n_subs = len(sub_iter)
+
+            # Only multi-solid leaves get a group id — single-solid leaves stay
+            # `None` so they're treated as standalone parts (no re-grouping needed).
+            group_id = None
+            if n_subs > 1:
+                group_id = group_counter[0]
+                group_counter[0] += 1
 
             from OCP.BRepGProp import BRepGProp
             from OCP.GProp import GProp_GProps
@@ -297,6 +313,7 @@ def load_parts(step_path: str | Path) -> list[Part]:
                         orientation=orientation,
                         axisymmetric=axisymmetric,
                         color=sub_color,
+                        source_group=group_id,
                     )
                 )
 
