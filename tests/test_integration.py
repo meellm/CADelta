@@ -542,6 +542,75 @@ def test_unchanged_part_preserves_v2_color(tmp_path: Path):
         )
 
 
+def test_diff_step_preserves_master_instance_sharing(tmp_path: Path):
+    """When v2 is an assembly that references one master shape from N components,
+    diff.step must preserve that master/instance graph instead of baking N
+    independent geometry copies.
+
+    Without this, the writer's `_bake_location` flattens every Part's world
+    transform into a fresh duplicated geometry, producing files that grow
+    linearly with instance count. On real assemblies (e.g. an electronics
+    board with 100 identical screws referenced from one master) that means
+    diff.step balloons to 4×+ the size of v2.step, making the output slow or
+    impossible to open in third-party CAD viewers.
+
+    This test compares the in-place mutation path (passing `doc_v2`) against
+    the legacy bake path (`doc_v2=None`) for the same diff. The in-place
+    output should be markedly smaller, proving sharing is preserved."""
+    from cadelta.reader import load_parts_with_doc
+
+    # Five instances of one master box, identical between v1 and v2 → all
+    # UNCHANGED, no deltas, no bakes from v1. The only knob exercised is
+    # whether v2's master/instance graph is preserved.
+    box = box_at(20, 20, 20)
+    instances = [
+        ("inst1", box, loc_translate(0, 0, 0)),
+        ("inst2", box, loc_translate(50, 0, 0)),
+        ("inst3", box, loc_translate(100, 0, 0)),
+        ("inst4", box, loc_translate(150, 0, 0)),
+        ("inst5", box, loc_translate(200, 0, 0)),
+    ]
+    v1 = tmp_path / "v1.step"
+    v2 = tmp_path / "v2.step"
+    make_assembly_step(v1, instances)
+    make_assembly_step(v2, instances)
+
+    parts_v1 = load_parts(v1)
+    parts_v2, doc_v2 = load_parts_with_doc(v2)
+    assert len(parts_v1) == 5 and len(parts_v2) == 5
+
+    result = diff_parts(parts_v1, parts_v2)
+    assert all(e.status == Status.UNCHANGED for e in result.entries), (
+        f"identical assemblies should all pair as UNCHANGED, got "
+        f"{[e.status for e in result.entries]}"
+    )
+
+    # In-place path: pass doc_v2 to preserve v2's master/instance graph.
+    out_inplace = tmp_path / "diff_inplace.step"
+    write_diff(result, out_inplace, doc_v2=doc_v2)
+
+    # Legacy bake path: same diff, no doc_v2 → every instance is baked.
+    # Re-run diff because the in-place writer mutated doc_v2 in place; the
+    # legacy run only looks at the entries, which are independent of doc_v2.
+    parts_v1b = load_parts(v1)
+    parts_v2b = load_parts(v2)
+    result_b = diff_parts(parts_v1b, parts_v2b)
+    out_legacy = tmp_path / "diff_legacy.step"
+    write_diff(result_b, out_legacy)
+
+    inplace_size = out_inplace.stat().st_size
+    legacy_size = out_legacy.stat().st_size
+    # The legacy path bakes 5 independent geometry copies; the in-place path
+    # reuses v2's single master with 5 component refs. The ratio should be
+    # comfortably below 1× — pin it at 0.7× to allow some metadata jitter
+    # while still catching the regression that motivated this test.
+    assert inplace_size < legacy_size * 0.7, (
+        f"In-place output ({inplace_size} bytes) should be markedly smaller "
+        f"than the bake path ({legacy_size} bytes); ratio "
+        f"{inplace_size / legacy_size:.2f}. Master/instance sharing was lost."
+    )
+
+
 def test_cli_help_runs():
     """Smoke-test the CLI entrypoint."""
     from click.testing import CliRunner

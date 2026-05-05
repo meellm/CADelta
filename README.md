@@ -12,6 +12,7 @@ Compare two versions of a mechanical assembly and see — in a single colored ou
 - 🎨 **Original** — unchanged parts keep whatever color v2 had assigned to them, so the output reads like v2 with the change overlays popping out (gray fallback when v2 has no color set)
 - Smart matching — pairs parts by geometry signature (volume, surface area, sorted bounding-box, face count) and world-space centroid, so renames, re-exports, and STEP entity renumbering don't trigger spurious diffs.
 - Centroid-based movement detection — works whether position is encoded as an XCAF transform or baked into geometry coordinates.
+- Compact output — diff.step is produced by mutating v2's XCAF document in place (recoloring leaves), so the original master/instance sharing is preserved and file size stays roughly proportional to v2.step rather than ballooning with instance count.
 - Multiple outputs — colored STEP for your CAD app, GLB for any browser glTF viewer, JSON report for scripting.
 - Configurable tolerance, defaulting to 0.01 mm / 0.01°.
 - Cross-platform (macOS, Linux, Windows). Pure pip, no conda.

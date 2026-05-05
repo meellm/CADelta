@@ -7,7 +7,7 @@ from pathlib import Path
 import click
 
 from .matcher import DEFAULT_TOL_DEG, DEFAULT_TOL_MM, Status, diff_parts
-from .reader import load_parts
+from .reader import load_parts, load_parts_with_doc
 from .writer import write_diff
 
 
@@ -41,7 +41,11 @@ def main(v1: Path, v2: Path, output: Path, gltf: Path | None,
     click.echo(f"  {len(parts_v1)} part(s)", err=True)
 
     click.echo(f"Reading {v2} ...", err=True)
-    parts_v2 = load_parts(v2)
+    # Load v2 WITH its XCAFDoc — the writer will mutate the doc in place
+    # (recoloring leaves to indicate diff status) so the output preserves v2's
+    # native master/instance graph. Rebuilding from scratch via baked geometry
+    # bloats the file ~4× on real assemblies that share masters across instances.
+    parts_v2, doc_v2 = load_parts_with_doc(v2)
     click.echo(f"  {len(parts_v2)} part(s)", err=True)
 
     click.echo(f"Diffing (tol_mm={tol_mm}, tol_deg={tol_deg}) ...", err=True)
@@ -55,7 +59,7 @@ def main(v1: Path, v2: Path, output: Path, gltf: Path | None,
     )
 
     click.echo(f"Writing {output} ...", err=True)
-    write_diff(result, output, out_gltf=gltf)
+    write_diff(result, output, doc_v2=doc_v2, out_gltf=gltf)
     if gltf is not None:
         click.echo(f"  also wrote {gltf}", err=True)
 

@@ -36,6 +36,15 @@ class Part:
     # bloat for batched components like "147 screws as one entity"). `None` means the
     # part stands alone — either a single-solid leaf or a synthetic test part.
     source_group: Optional[int] = None
+    # Persistent entry string of the XCAF label this part is addressed by — the
+    # deepest *component* label for assembly instances, or the leaf label itself
+    # for top-level free shapes. The writer uses this entry to look the label up
+    # in the v2 doc and recolor/rename it IN PLACE, instead of rebuilding from
+    # scratch (which destroys master/instance sharing and bloats the output 4× on
+    # real assemblies). Sub-parts of a split compound share the same
+    # `label_entry`, disambiguated by `source_group`. `None` for synthetic test
+    # parts that bypass the reader.
+    label_entry: Optional[str] = None
 
     def __post_init__(self):
         # If no explicit centroid is provided (e.g. synthetic test parts), derive it
@@ -221,8 +230,38 @@ def _read_doc(step_path: Path):
     return doc
 
 
+def _label_entry(label) -> str:
+    """Return the persistent entry string (e.g. ``"0:1:1:3"``) of a TDF_Label.
+
+    Stable for the lifetime of the doc — used by the writer to look labels up
+    in the v2 doc for in-place recoloring.
+    """
+    from OCP.TDF import TDF_Tool
+    from OCP.TCollection import TCollection_AsciiString
+    s = TCollection_AsciiString()
+    TDF_Tool.Entry_s(label, s)
+    return s.ToCString()
+
+
 def load_parts(step_path: str | Path) -> list[Part]:
-    """Load a STEP file and return a flat list of leaf parts with world-space transforms."""
+    """Load a STEP file and return a flat list of leaf parts with world-space transforms.
+
+    Backward-compatible wrapper around :func:`load_parts_with_doc` that drops the
+    XCAFDoc. Use ``load_parts_with_doc`` instead when you need the doc (e.g. for
+    the writer's in-place mutation path).
+    """
+    parts, _doc = load_parts_with_doc(step_path)
+    return parts
+
+
+def load_parts_with_doc(step_path: str | Path):
+    """Load a STEP file and return ``(parts, doc)``.
+
+    The doc is the XCAFDoc the reader populated from the STEP file — caller can
+    hand it to the writer so the diff output preserves the original
+    master/instance graph (massively reducing file size for assemblies with
+    repeated parts) instead of being rebuilt from baked geometry.
+    """
     from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ShapeTool
     from OCP.TDF import TDF_LabelSequence, TDF_Label
     from OCP.TopLoc import TopLoc_Location
@@ -238,7 +277,13 @@ def load_parts(step_path: str | Path) -> list[Part]:
     group_counter = [0]
 
     def walk(label, parent_loc: "TopLoc_Location", name_prefix: str,
-             parent_color: Optional[tuple[float, float, float]]):
+             parent_color: Optional[tuple[float, float, float]],
+             addressable_label):
+        # `addressable_label` is the deepest *component* label seen so far on this
+        # path (or the free-shape root label if we haven't traversed an assembly).
+        # Its entry string is what the writer uses to recolor/rename the
+        # specific instance — coloring the master would change every instance
+        # that references it, which is the whole bug we're fixing.
         # XCAF color inheritance: a color set directly on the label wins; otherwise
         # the part inherits whatever color came from the assembly chain above it.
         label_color = _label_color(label) or parent_color
@@ -256,7 +301,10 @@ def load_parts(step_path: str | Path) -> list[Part]:
                     child_prefix = f"{name_prefix}/{comp_name}" if name_prefix else comp_name
                     # Component-level color overrides assembly color for that instance.
                     comp_color = _label_color(comp) or label_color
-                    walk(ref, world_loc, child_prefix, comp_color)
+                    # Each component is the new addressable label for its subtree:
+                    # one master shape may be referenced N times, but each comp is
+                    # unique, so coloring it affects only that instance.
+                    walk(ref, world_loc, child_prefix, comp_color, addressable_label=comp)
         else:
             shape = XCAFDoc_ShapeTool.GetShape_s(label)
             if shape.IsNull():
@@ -276,6 +324,10 @@ def load_parts(step_path: str | Path) -> list[Part]:
             if n_subs > 1:
                 group_id = group_counter[0]
                 group_counter[0] += 1
+
+            # Capture the addressable entry once per leaf — every sub-part of a
+            # split compound shares the same XCAF address.
+            leaf_entry = _label_entry(addressable_label)
 
             from OCP.BRepGProp import BRepGProp
             from OCP.GProp import GProp_GProps
@@ -314,6 +366,7 @@ def load_parts(step_path: str | Path) -> list[Part]:
                         axisymmetric=axisymmetric,
                         color=sub_color,
                         source_group=group_id,
+                        label_entry=leaf_entry,
                     )
                 )
 
@@ -323,6 +376,8 @@ def load_parts(step_path: str | Path) -> list[Part]:
     for i in range(1, free_labels.Length() + 1):
         root = free_labels.Value(i)
         root_name = _label_name(root) or ""
-        walk(root, identity, root_name, parent_color=None)
+        # Free-shape roots ARE the addressable label for everything underneath
+        # until we cross into an assembly's component slot.
+        walk(root, identity, root_name, parent_color=None, addressable_label=root)
 
-    return parts
+    return parts, doc
