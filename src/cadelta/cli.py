@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import click
@@ -37,7 +36,13 @@ def main(v1: Path, v2: Path, output: Path, gltf: Path | None,
       original    = unchanged (keeps the V2 color; gray fallback)
     """
     click.echo(f"Reading {v1} ...", err=True)
-    parts_v1 = load_parts(v1)
+    try:
+        parts_v1 = load_parts(v1)
+    except RuntimeError as exc:
+        # OCCT's STEPCAFControl_Reader raises RuntimeError for malformed or
+        # unsupported STEP files; surface a clean message instead of a Python
+        # traceback.
+        raise click.ClickException(f"Could not read {v1}: {exc}") from exc
     click.echo(f"  {len(parts_v1)} part(s)", err=True)
 
     click.echo(f"Reading {v2} ...", err=True)
@@ -45,7 +50,10 @@ def main(v1: Path, v2: Path, output: Path, gltf: Path | None,
     # (recoloring leaves to indicate diff status) so the output preserves v2's
     # native master/instance graph. Rebuilding from scratch via baked geometry
     # bloats the file ~4× on real assemblies that share masters across instances.
-    parts_v2, doc_v2 = load_parts_with_doc(v2)
+    try:
+        parts_v2, doc_v2 = load_parts_with_doc(v2)
+    except RuntimeError as exc:
+        raise click.ClickException(f"Could not read {v2}: {exc}") from exc
     click.echo(f"  {len(parts_v2)} part(s)", err=True)
 
     click.echo(f"Diffing (tol_mm={tol_mm}, tol_deg={tol_deg}) ...", err=True)

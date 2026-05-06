@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 from .matcher import DiffEntry, DiffResult, Status
-from .reader import Part
+from .reader import Part, _label_entry
 
 # RGB triplets in 0..1.
 # UNCHANGED parts use whatever color the source v2 STEP assigned to them; this entry
@@ -45,18 +45,6 @@ def _set_name(label, name: str) -> None:
     if not name:
         return
     TDataStd_Name.Set_s(label, TCollection_ExtendedString(name))
-
-
-def _shape_xmin_xmax(shape) -> tuple[float, float]:
-    """Return (xmin, xmax) of a shape's axis-aligned bounding box; (0, 0) if void."""
-    from OCP.Bnd import Bnd_Box
-    from OCP.BRepBndLib import BRepBndLib
-    bb = Bnd_Box()
-    BRepBndLib.Add_s(shape, bb)
-    if bb.IsVoid():
-        return 0.0, 0.0
-    xmin, _, _, xmax, _, _ = bb.Get()
-    return xmin, xmax
 
 
 def _bake_location(shape):
@@ -138,25 +126,76 @@ def _set_label_color(color_tool, label, rgb: tuple[float, float, float]) -> None
     color_tool.SetColor(label, qcolor, XCAFDoc_ColorGen)
 
 
+def _find_root_assembly(shape_tool):
+    """Return the first free-shape label that's an assembly, or ``None``.
+
+    Diff bodies (REMOVED, MOVED_FROM ghosts, baked MOVED/ADDED replacements)
+    are attached as *components* of this assembly so third-party CAD viewers
+    that only render the main assembly tree still see them. Without this,
+    parallel free shapes go invisible in many viewers.
+    """
+    from OCP.TDF import TDF_LabelSequence
+    free = TDF_LabelSequence()
+    shape_tool.GetFreeShapes(free)
+    for i in range(1, free.Length() + 1):
+        lab = free.Value(i)
+        if shape_tool.IsAssembly_s(lab):
+            return lab
+    return None
+
+
+def _attach_baked_as_component(
+    shape_tool, color_tool, asm_label, baked, display_name: str,
+    rgb: tuple[float, float, float],
+):
+    """Add ``baked`` as a new component of ``asm_label`` and color the master.
+
+    Coloring the master (rather than the component) is critical for viewer
+    compatibility: many third-party CAD viewers honor only master-level
+    color attributes, ignoring per-instance overrides. Each baked body has
+    its own fresh master (no sharing with other parts), so master-level
+    color produces the right per-body diff coloring everywhere.
+
+    Returns the component label (or None on failure).
+    """
+    from OCP.TDF import TDF_Label
+    comp = shape_tool.AddComponent(asm_label, baked, False)
+    if comp.IsNull():
+        return None
+    # AddComponent created a fresh master internally; resolve it so we can
+    # attach the diff color and name there.
+    master = TDF_Label()
+    if shape_tool.GetReferredShape_s(comp, master) and not master.IsNull():
+        _set_name(master, display_name)
+        _set_label_color(color_tool, master, rgb)
+    else:
+        # Fallback if the master isn't reachable — set on the component itself.
+        _set_name(comp, display_name)
+        _set_label_color(color_tool, comp, rgb)
+    return comp
+
+
 def _recolor_v2_doc_in_place(diff: DiffResult, doc_v2):
-    """Walk the diff's v2 entries against ``doc_v2``, recoloring leaves in place.
+    """Walk v2 entries against ``doc_v2``, leaving UNCHANGED leaves in place
+    and excising every other leaf so the bake path can re-emit it with a
+    universally-honored master-level color.
 
-    Returns the list of entries whose v2 leaf could NOT be handled in place — for
-    example, a leaf whose split sub-parts carry mixed status (some MOVED, some
-    UNCHANGED), or a leaf that lacks a ``label_entry``. These leftover entries
-    are emitted afterwards by the legacy bake path so their per-body diff
-    coloring remains visible.
+    Why we no longer try to recolor MOVED/ADDED in place: third-party CAD
+    viewers don't reliably honor color attributes set on *component* labels
+    of a shared master. They render every instance in the master's color,
+    which makes our diff highlights invisible in the viewer. Component
+    excision + master-level baked replacement is the only universally
+    portable approach.
 
-    The big win: leaves where every sub-part is UNCHANGED, or every sub-part
-    shares one non-unchanged status, are handled by overwriting a single XCAF
-    color attribute. The geometry stays as-is, master/instance refs stay
-    shared, and the output stays as compact as v2.step.
+    Returns the list of entries that need fresh baked replacements. The
+    UNCHANGED majority stays in place, preserving v2's master/instance
+    sharing — that's where the file-size win still comes from.
     """
     from collections import defaultdict
-    from OCP.XCAFDoc import XCAFDoc_DocumentTool
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ShapeTool
+    from OCP.TDF import TDF_Label
 
     shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc_v2.Main())
-    color_tool = XCAFDoc_DocumentTool.ColorTool_s(doc_v2.Main())
 
     # Index v2-side entries by their addressing label; sub-parts of a split
     # compound share one entry, so the value is a list.
@@ -176,6 +215,12 @@ def _recolor_v2_doc_in_place(diff: DiffResult, doc_v2):
             continue
         v2_by_entry[part.label_entry].append(entry)
 
+    # Collect master labels of any component we excise so we can prune them
+    # later if RemoveComponent leaves them orphaned (no remaining references).
+    # Without this cleanup the orphan masters get promoted to free shapes by
+    # XCAF and the reader sees them as ghost bodies at the origin.
+    orphan_master_entries: set[str] = set()
+
     for entry_str, entries in v2_by_entry.items():
         label = _lookup_label(doc_v2, entry_str)
         if label is None:
@@ -186,38 +231,57 @@ def _recolor_v2_doc_in_place(diff: DiffResult, doc_v2):
         statuses = {e.status for e in entries}
 
         if statuses == {Status.UNCHANGED}:
-            # Tag the name only — original v2 color stays untouched, which is
-            # exactly the "preserves v2's color" behavior we want, achieved
-            # here for free.
+            # Leave the v2 leaf untouched: keeps original v2 color and the
+            # master/instance sharing that makes diff.step compact. We only
+            # tag the component's display name so the diff "[UNCHANGED]"
+            # marker is visible in viewers that show label names.
             _prefix_label_name(label, "UNCHANGED")
             continue
 
-        if len(statuses) == 1:
-            # All sub-parts share one non-unchanged status: recolor the whole
-            # leaf with that status's color.
-            status = next(iter(statuses))
-            _set_label_color(color_tool, label, COLOR_BY_STATUS[status])
-            _prefix_label_name(label, _STATUS_TAG[status])
-            continue
+        # Any non-UNCHANGED entry on this leaf — single status or mixed —
+        # gets routed to the bake path. We excise the v2 component first
+        # so the same body doesn't end up rendered twice (once at v2 in
+        # the original color, once at v2 baked in the new color).
+        # Capture the referenced master BEFORE excising so we can prune it
+        # afterwards if it becomes orphaned.
+        master = TDF_Label()
+        had_master = shape_tool.GetReferredShape_s(label, master) and not master.IsNull()
+        master_entry = _label_entry(master) if had_master else None
 
-        # Mixed status across the same XCAF leaf: we can't recolor one body
-        # inside a compound through a single label attribute. Try to remove
-        # the leaf cleanly and let the legacy bake path re-emit each sub-part
-        # as an individual coloured body. RemoveShape only succeeds for
-        # free-shape labels — for component-referenced masters it returns
-        # False, in which case we leave the leaf in place (with its original
-        # v2 colors) and overlay baked deltas on top: not ideal visually but
-        # keeps the file readable.
-        if shape_tool.RemoveShape(label):
+        # RemoveComponent works for assembly components; RemoveShape works
+        # for free-shape leaves. Try RemoveComponent first since reader's
+        # `addressable_label` is the deepest component for assembly inputs.
+        removed_ok = False
+        try:
+            shape_tool.RemoveComponent(label)
+            removed_ok = True
+        except Exception:
+            removed_ok = False
+        if not removed_ok:
+            removed_ok = bool(shape_tool.RemoveShape(label))
+
+        if removed_ok:
             leftover.extend(entries)
+            if master_entry is not None:
+                orphan_master_entries.add(master_entry)
         else:
-            # Couldn't excise the leaf — bake the moved/added sub-parts
-            # anyway so their per-body color shows; the unchanged siblings
-            # keep their original v2 color through the surviving leaf.
+            # Couldn't excise the original — emit the deltas on top anyway
+            # so the user at least sees them in the viewer. UNCHANGED
+            # siblings of a mixed leaf keep their original v2 color via
+            # the surviving leaf.
             leftover.extend(
-                e for e in entries
-                if e.status != Status.UNCHANGED
+                e for e in entries if e.status != Status.UNCHANGED
             )
+
+    # Prune orphan masters: any tracked master that's now `IsFree_s` (no
+    # component references remaining) gets removed, otherwise the reader
+    # would treat it as a ghost free shape at the origin.
+    for master_entry in orphan_master_entries:
+        ml = _lookup_label(doc_v2, master_entry)
+        if ml is None or ml.IsNull():
+            continue
+        if XCAFDoc_ShapeTool.IsFree_s(ml):
+            shape_tool.RemoveShape(ml)
 
     return leftover
 
@@ -228,20 +292,30 @@ def _emit_baked_into_doc(
     removed_entries: list[DiffEntry],
     moved_ghost_entries: list[DiffEntry],
 ) -> None:
-    """Add fresh baked labels to ``doc`` for entries that aren't (or can no
-    longer be) represented by an existing v2-doc leaf.
+    """Add fresh baked labels to ``doc`` for entries that need their own
+    geometry (and master-level color) in the output.
 
-    This is the only path that calls :func:`_bake_location` — flattening
-    world-space transforms into geometry. Restricted to:
+    This is the only path that calls :func:`_bake_location`. Bodies handled
+    here:
 
-    - REMOVED parts (only present in v1, must be added at v1 world position),
-    - MOVED-from ghosts (the soft-pink overlay at v1 world position),
-    - leftover v2 entries the in-place pass couldn't handle (mixed-status
-      leaves; or doc-less synthetic inputs).
+    - leftover v2 entries (MOVED, ADDED, mixed-leaf sub-parts) excised from
+      the v2 assembly by :func:`_recolor_v2_doc_in_place`,
+    - REMOVED parts (only present in v1, baked at v1 world position),
+    - MOVED-from ghosts (soft-pink overlay at v1 world position).
 
-    Sub-parts of the same source-compound that came through as leftovers and
-    share status+color are re-grouped into a single TopoDS_Compound so the
-    output stays compact.
+    When ``doc`` contains a root assembly, baked bodies are attached as
+    *components* of that assembly with their color set on the master label.
+    This is the universally-portable path: third-party CAD viewers honor
+    master-level color and render the assembly's children.
+
+    When no root assembly exists (synthetic test docs built via
+    :func:`make_step` from flat free shapes), baked bodies are added as
+    parallel free shapes — the legacy behavior that keeps the existing
+    test fixtures' assertions about free-shape topology valid.
+
+    Sub-parts of the same source-compound that came through as leftovers
+    and share status+color are re-grouped into a single TopoDS_Compound so
+    the output stays compact.
     """
     from collections import defaultdict
     from OCP.XCAFDoc import XCAFDoc_DocumentTool
@@ -250,11 +324,22 @@ def _emit_baked_into_doc(
 
     shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
     color_tool = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
+    root_asm = _find_root_assembly(shape_tool)
 
     def _emit_label(shape, display_name: str, rgb: tuple[float, float, float]) -> None:
-        label = shape_tool.AddShape(shape, False)
-        _set_name(label, display_name)
-        _set_label_color(color_tool, label, rgb)
+        if root_asm is not None:
+            # Assembly present: attach as component, set color on master so
+            # all viewers (including ones that ignore component-level color
+            # overrides on shared masters) render the diff highlight.
+            _attach_baked_as_component(
+                shape_tool, color_tool, root_asm, shape, display_name, rgb,
+            )
+        else:
+            # Doc has no assembly — fall back to free-shape addition, same
+            # as the legacy from-scratch writer path.
+            label = shape_tool.AddShape(shape, False)
+            _set_name(label, display_name)
+            _set_label_color(color_tool, label, rgb)
 
     # Bucket leftover v2 entries: sub-parts of the same source_group sharing one
     # status + color regroup into a single compound on output (avoids 100×
@@ -363,6 +448,8 @@ def write_diff(
     from OCP.IFSelect import IFSelect_RetDone
     from OCP.Interface import Interface_Static
 
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool
+
     if doc_v2 is not None:
         doc = doc_v2
         leftover_v2 = _recolor_v2_doc_in_place(diff, doc)
@@ -389,6 +476,12 @@ def write_diff(
         and e.part_v1.shape is not None
     ]
     _emit_baked_into_doc(doc, leftover_v2, removed, moved_ghosts)
+
+    # Rebuild assembly bounds/structure after RemoveComponent and AddComponent
+    # mutations so STEP serialization sees a consistent tree. Without this,
+    # newly-attached components can be missing from the assembly's effective
+    # shape, which surfaces as them being absent in third-party CAD viewers.
+    XCAFDoc_DocumentTool.ShapeTool_s(doc.Main()).UpdateAssemblies()
 
     out_step = Path(out_step)
     out_step.parent.mkdir(parents=True, exist_ok=True)

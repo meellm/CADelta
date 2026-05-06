@@ -77,16 +77,16 @@ Measured locally on synthetic flat assemblies (Apple Silicon Mac):
 
 | Parts | Read v1+v2 | Diff | Write STEP | Total | Peak RSS |
 |-------|-----------|------|-----------|-------|----------|
-| 200   | 0.5 s     | <0.01 s | 0.1 s   | 0.9 s  | 355 MB   |
-| 1,000 | 2.9 s     | 0.01 s  | 1.0 s   | 5.1 s  | 636 MB   |
-| 3,000 | 9.2 s     | 0.02 s  | 2.0 s   | 16 s   | 1.2 GB   |
+| 200   | 0.6 s     | 0.03 s  | 0.1 s   | 1.5 s  | 355 MB   |
+| 1,000 | 2.9 s     | 0.9 s   | 0.6 s   | 5.6 s  | 712 MB   |
+| 3,000 | 9.6 s     | 8.8 s   | 1.9 s   | 25 s   | 2.4 GB   |
 
-Scaling is linear end-to-end; the matcher itself is essentially free. For very large assemblies (10,000+ parts) expect roughly one minute and ~4 GB of RAM.
+The bench inputs are pathological for the matcher: every part shares the same geometry signature, so the inner candidate-pair sort runs at O(n²). Real-world assemblies have varied geometry — distinct signatures bucket parts into small groups, and the matcher is essentially free. File sizes also stay close to v2.step on real assemblies because the writer preserves the original master/instance graph instead of baking copies.
 
 ## 🧪 Tests
 
 ```bash
-pytest                          # 19 tests — pure logic + end-to-end round trip
+pytest                          # 30 tests — pure logic + end-to-end round trip
 python tests/bench.py 1000      # Stress benchmark
 ```
 
@@ -97,7 +97,7 @@ python tests/bench.py 1000      # Stress benchmark
 | CLI       | [`src/cadelta/cli.py`](src/cadelta/cli.py)             | Click-based entrypoint. |
 | Reader    | [`src/cadelta/reader.py`](src/cadelta/reader.py)       | STEP → list of `Part(name, shape, transform, signature, centroid)`. |
 | Signature | [`src/cadelta/signature.py`](src/cadelta/signature.py) | Pose-invariant geometry fingerprint. |
-| Matcher   | [`src/cadelta/matcher.py`](src/cadelta/matcher.py)     | Name → signature pairing; classifies each pair. |
+| Matcher   | [`src/cadelta/matcher.py`](src/cadelta/matcher.py)     | Signature + nearest-centroid pairing; classifies each pair. |
 | Writer    | [`src/cadelta/writer.py`](src/cadelta/writer.py)       | Builds the colored output STEP and optional GLB. |
 
 OCCT (OpenCascade) bindings come from [`cadquery-ocp`](https://pypi.org/project/cadquery-ocp/) — pure pip, no conda required.

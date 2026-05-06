@@ -611,6 +611,104 @@ def test_diff_step_preserves_master_instance_sharing(tmp_path: Path):
     )
 
 
+def test_diff_bodies_attached_to_v2_assembly_for_viewer_compat(tmp_path: Path):
+    """When v2 is an assembly, every diff body (MOVED, ADDED, REMOVED, and the
+    MOVED-from ghost) must end up as a *component* of that assembly — not as
+    parallel free shapes — and each must carry its diff color on its master
+    label.
+
+    Regression for the visual bug where diff.step looked identical to v2 in
+    third-party CAD viewers: viewers that only render the main assembly tree
+    would skip parallel free shapes entirely (so REMOVED + MOVED_FROM ghosts
+    were invisible), and viewers that ignore component-level color overrides
+    on shared masters would show MOVED/ADDED in v2's original color
+    (so the diff highlights were invisible).
+
+    This test pins both invariants down by inspecting the output's XCAF tree
+    AND the raw STEP entities."""
+    import re
+    from cadelta.reader import load_parts_with_doc
+    from cadelta.writer import COLOR_BY_STATUS, COLOR_MOVED_FROM
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool
+    from OCP.TDF import TDF_LabelSequence
+
+    # Distinct sizes so the matcher can pair them by signature unambiguously.
+    box_a = box_at(20, 20, 20)
+    box_b = box_at(15, 15, 15)
+    box_c = box_at(10, 10, 10)
+    box_d = box_at(8, 8, 8)
+    v1_parts = [
+        ("a", box_a, loc_translate(0, 0, 0)),
+        ("b", box_b, loc_translate(50, 0, 0)),
+        ("c", box_c, loc_translate(100, 0, 0)),
+    ]
+    v2_parts = [
+        ("a", box_a, loc_translate(0, 0, 0)),
+        ("b", box_b, loc_translate(50, 30, 0)),  # moved
+        ("d", box_d, loc_translate(150, 0, 0)),  # added
+    ]
+    v1 = tmp_path / "v1.step"
+    v2 = tmp_path / "v2.step"
+    make_assembly_step(v1, v1_parts)
+    make_assembly_step(v2, v2_parts)
+
+    parts_v1 = load_parts(v1)
+    parts_v2, doc_v2 = load_parts_with_doc(v2)
+    result = diff_parts(parts_v1, parts_v2)
+
+    out = tmp_path / "diff.step"
+    write_diff(result, out, doc_v2=doc_v2)
+
+    # Topology: exactly ONE free shape (the v2 assembly). No parallel
+    # free shapes carrying diff bodies — viewers that ignore parallel
+    # free shapes would lose them.
+    parts_diff, doc = load_parts_with_doc(out)
+    shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+    free = TDF_LabelSequence()
+    shape_tool.GetFreeShapes(free)
+    assert free.Length() == 1, (
+        f"diff.step should have exactly one free shape (the v2 assembly); "
+        f"got {free.Length()}. Extra free shapes mean diff bodies leaked "
+        "outside the assembly tree and would be invisible in some viewers."
+    )
+
+    # Every diff body must carry its specific color and be reachable via
+    # load_parts (which walks the assembly).
+    by_color: dict[tuple, list] = {}
+    for p in parts_diff:
+        if p.color is None:
+            continue
+        key = tuple(round(c, 2) for c in p.color)
+        by_color.setdefault(key, []).append(p)
+
+    expected_colors = {
+        tuple(round(c, 2) for c in COLOR_BY_STATUS[Status.MOVED]),
+        tuple(round(c, 2) for c in COLOR_BY_STATUS[Status.ADDED]),
+        tuple(round(c, 2) for c in COLOR_BY_STATUS[Status.REMOVED]),
+        tuple(round(c, 2) for c in COLOR_MOVED_FROM),
+    }
+    found_colors = set(by_color.keys())
+    missing = expected_colors - found_colors
+    assert not missing, (
+        f"Missing diff colors in output: {missing}. "
+        f"Found: {found_colors}. The viewer would not see the diff highlights."
+    )
+
+    # Raw STEP entity check: at least one explicit color entity for each of
+    # the four diff colors. This is what third-party viewers parse — verifying
+    # in the load_parts API alone would mask serialization problems where
+    # cadelta's reader recovers colors from somewhere viewers don't honor.
+    text = out.read_text()
+    color_entities = re.findall(
+        r"COLOUR_RGB\([^)]+\)|DRAUGHTING_PRE_DEFINED_COLOUR\([^)]+\)", text,
+    )
+    assert len(set(color_entities)) >= 4, (
+        f"Expected at least 4 distinct color entities in STEP output "
+        f"(MOVED, ADDED, REMOVED, MOVED_FROM); found {len(set(color_entities))}: "
+        f"{set(color_entities)}"
+    )
+
+
 def test_cli_help_runs():
     """Smoke-test the CLI entrypoint."""
     from click.testing import CliRunner

@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent))
 
 from conftest import box_at, make_step  # noqa: E402
-from cadelta.reader import load_parts  # noqa: E402
-from cadelta.matcher import diff_parts  # noqa: E402
+from cadelta.reader import load_parts, load_parts_with_doc  # noqa: E402
+from cadelta.matcher import Status, diff_parts  # noqa: E402
 from cadelta.writer import write_diff  # noqa: E402
 
 
@@ -84,17 +84,19 @@ def bench(n: int, with_gltf: bool, tmp: Path) -> dict:
     t_read1 = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    parts_v2 = load_parts(v2)
+    # Use the same `load_parts_with_doc` path the CLI uses — the writer
+    # mutates v2's XCAFDoc in place to preserve master/instance sharing.
+    parts_v2, doc_v2 = load_parts_with_doc(v2)
     t_read2 = time.perf_counter() - t0
 
     t0 = time.perf_counter()
     result = diff_parts(parts_v1, parts_v2)
     t_diff = time.perf_counter() - t0
 
-    counts = {s.value: len(result.by_status(s)) for s in __import__("cadelta.matcher", fromlist=["Status"]).Status}
+    counts = {s.value: len(result.by_status(s)) for s in Status}
 
     t0 = time.perf_counter()
-    write_diff(result, out_step, out_gltf=out_glb if with_gltf else None)
+    write_diff(result, out_step, doc_v2=doc_v2, out_gltf=out_glb if with_gltf else None)
     t_write = time.perf_counter() - t0
 
     mem = rss_mb()
