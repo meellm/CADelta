@@ -709,6 +709,205 @@ def test_diff_bodies_attached_to_v2_assembly_for_viewer_compat(tmp_path: Path):
     )
 
 
+def test_unchanged_assembly_instances_collapse_under_parent(tmp_path: Path):
+    """Regression: when v2 is structured as an assembly of N components that all
+    share ONE master shape (the "screw_18 component with N screw instances"
+    pattern from real CAD exports), the writer must merge the UNCHANGED
+    instances back under a single component child of their parent assembly —
+    NOT leave them as N separate component slots that clutter the user's CAD
+    viewer tree.
+
+    This is the assembly-of-instances counterpart to the
+    `test_diff_step_regroups_unchanged_compound_subshapes` test, which covers
+    the true-`TopoDS_Compound`-leaf path. Both must produce a single merged
+    output node for the user to perceive the diff as "still one component
+    with the screws inside it"."""
+    from cadelta.reader import load_parts_with_doc
+    from cadelta.writer import COLOR_MOVED_FROM
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ShapeTool
+    from OCP.TDF import TDF_LabelSequence
+
+    N = 12
+    master_box = box_at(5.0, 5.0, 5.0)
+    instances_v1 = [(f"s{i}", master_box, loc_translate(i * 8.0, 0, 0)) for i in range(N)]
+    # v2: same structure except the middle instance moves +30mm in Y.
+    instances_v2 = list(instances_v1)
+    instances_v2[N // 2] = (f"s{N // 2}", master_box, loc_translate((N // 2) * 8.0, 30.0, 0))
+
+    v1 = tmp_path / "v1.step"
+    v2 = tmp_path / "v2.step"
+    make_assembly_step(v1, instances_v1)
+    make_assembly_step(v2, instances_v2)
+
+    parts_v1 = load_parts(v1)
+    parts_v2, doc_v2 = load_parts_with_doc(v2)
+    # Sanity: every part has source_group=None (assembly of singletons, not a
+    # split compound) — this is exactly the structural pattern that, before
+    # this fix, would leave UNCHANGED siblings as N individual component slots.
+    assert all(p.source_group is None for p in parts_v2)
+
+    result = diff_parts(parts_v1, parts_v2)
+    counts = {s: len(result.by_status(s)) for s in Status}
+    # The matcher pairs by signature+centroid; the moved one moves far enough
+    # to register as MOVED, the rest as UNCHANGED.
+    assert counts[Status.UNCHANGED] == N - 1
+    assert counts[Status.MOVED] == 1
+
+    out = tmp_path / "diff.step"
+    write_diff(result, out, doc_v2=doc_v2)
+
+    # Inspect the output's XCAF tree at the parent level. Before the fix the
+    # parent had N components (the N-1 surviving UNCHANGED instances + the
+    # baked MOVED + the MOVED_FROM ghost = N+1). After the fix it has a
+    # single collapsed sub-assembly + the deltas.
+    _parts_diff, doc_out = load_parts_with_doc(out)
+    shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc_out.Main())
+    free = TDF_LabelSequence()
+    shape_tool.GetFreeShapes(free)
+    assert free.Length() == 1
+    root = free.Value(1)
+    assert XCAFDoc_ShapeTool.IsAssembly_s(root)
+    root_comps = TDF_LabelSequence()
+    XCAFDoc_ShapeTool.GetComponents_s(root, root_comps)
+    # Expected children of root: 1 collapsed UNCHANGED group + 1 MOVED + 1 MOVED_FROM = 3.
+    # Without the collapse this was N + 1 = 13.
+    assert root_comps.Length() == 3, (
+        f"expected 3 root components after collapse (1 UNCHANGED group + 1 MOVED + "
+        f"1 MOVED_FROM); got {root_comps.Length()}. The N-1 unchanged instances "
+        "are leaking out as individual components instead of being merged."
+    )
+
+    # The collapsed UNCHANGED master should still be a "real" assembly with N-1
+    # component children, each pointing back to the original master shape so
+    # STEP serialization preserves master/instance sharing (file size win).
+    parts_diff = load_parts(out)
+    unchanged = [p for p in parts_diff if "UNCHANGED" in p.name]
+    assert len(unchanged) == N - 1, (
+        f"every UNCHANGED instance should still be reachable inside the "
+        f"collapsed group; got {len(unchanged)} / expected {N - 1}"
+    )
+
+    # Master/instance sharing check: file should not balloon. Compare against
+    # the v2 input — diff.step adds a few baked delta bodies but the bulk of
+    # v2's geometry should still be referenced once, not duplicated N times.
+    v2_size = v2.stat().st_size
+    diff_size = out.stat().st_size
+    assert diff_size < v2_size * 4.0, (
+        f"diff.step ({diff_size} B) is more than 4× v2.step ({v2_size} B). "
+        "The collapse pass is likely baking each instance as independent "
+        "geometry instead of preserving master/instance sharing."
+    )
+
+    # MOVED + ghost data is still present and untouched by the collapse.
+    moved = [p for p in parts_diff if "[MOVED]" in p.name]
+    moved_from = [p for p in parts_diff if "MOVED_FROM" in p.name]
+    assert len(moved) == 1
+    assert len(moved_from) == 1
+
+
+def test_collapse_pass_does_not_merge_distinct_masters(tmp_path: Path):
+    """Critical guardrail: the collapse pass must NOT merge UNCHANGED siblings
+    that reference *different* master shapes, even when they share a parent
+    and a color. If it did, every flat assembly with N unique parts would get
+    collapsed into one compound — exactly the "whole project under one
+    component" regression we explicitly want to prevent.
+
+    Setup: an assembly of 5 differently-sized boxes (5 distinct masters) under
+    one parent, all unchanged between v1 and v2. The output must keep all 5
+    as separate component slots."""
+    from cadelta.reader import load_parts_with_doc
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ShapeTool
+    from OCP.TDF import TDF_LabelSequence
+
+    # 5 distinct masters → 5 distinct signatures → distinct XCAF labels.
+    boxes = [box_at(s, s, s) for s in (5, 7, 9, 11, 13)]
+    instances = [(f"p{i}", b, loc_translate(i * 30.0, 0, 0)) for i, b in enumerate(boxes)]
+
+    v1 = tmp_path / "v1.step"
+    v2 = tmp_path / "v2.step"
+    make_assembly_step(v1, instances)
+    make_assembly_step(v2, instances)
+
+    parts_v1 = load_parts(v1)
+    parts_v2, doc_v2 = load_parts_with_doc(v2)
+    result = diff_parts(parts_v1, parts_v2)
+    assert all(e.status == Status.UNCHANGED for e in result.entries)
+
+    out = tmp_path / "diff.step"
+    write_diff(result, out, doc_v2=doc_v2)
+
+    _parts, doc_out = load_parts_with_doc(out)
+    shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc_out.Main())
+    free = TDF_LabelSequence()
+    shape_tool.GetFreeShapes(free)
+    root = free.Value(1)
+    root_comps = TDF_LabelSequence()
+    XCAFDoc_ShapeTool.GetComponents_s(root, root_comps)
+    # All 5 should remain individual under the parent — no collapse.
+    assert root_comps.Length() == 5, (
+        f"expected 5 individual components (different masters → no collapse); "
+        f"got {root_comps.Length()}. This is the 'whole project under one "
+        "component' regression — collapse is firing on distinct masters."
+    )
+
+
+def test_collapse_pass_does_not_lose_added_or_removed(tmp_path: Path):
+    """Belt-and-braces: with N instances of one master that include MOVED,
+    ADDED, and REMOVED siblings alongside the UNCHANGED ones, the collapse
+    pass must preserve every status. Lost MOVED/ADDED/REMOVED entries was a
+    prior regression the user explicitly warned about."""
+    from cadelta.reader import load_parts_with_doc
+    from cadelta.writer import COLOR_MOVED_FROM
+
+    master = box_at(5.0, 5.0, 5.0)
+    instances_v1 = [
+        ("a", master, loc_translate(0, 0, 0)),       # unchanged
+        ("b", master, loc_translate(20, 0, 0)),      # unchanged
+        ("c", master, loc_translate(40, 0, 0)),      # unchanged
+        ("d", master, loc_translate(60, 0, 0)),      # will be MOVED in v2
+        ("e", master, loc_translate(80, 0, 0)),      # will be REMOVED in v2
+    ]
+    instances_v2 = [
+        ("a", master, loc_translate(0, 0, 0)),
+        ("b", master, loc_translate(20, 0, 0)),
+        ("c", master, loc_translate(40, 0, 0)),
+        ("d", master, loc_translate(60, 50, 0)),     # MOVED
+        ("f", master, loc_translate(100, 0, 0)),     # ADDED (replaces e)
+    ]
+
+    v1 = tmp_path / "v1.step"
+    v2 = tmp_path / "v2.step"
+    make_assembly_step(v1, instances_v1)
+    make_assembly_step(v2, instances_v2)
+
+    parts_v1 = load_parts(v1)
+    parts_v2, doc_v2 = load_parts_with_doc(v2)
+    result = diff_parts(parts_v1, parts_v2)
+    counts = {s: len(result.by_status(s)) for s in Status}
+    # Sanity: matcher pairs by signature+centroid. With all instances sharing
+    # one master (and therefore one signature), the greedy nearest-centroid
+    # assignment determines what's MOVED vs ADDED/REMOVED. Validate the count
+    # *categories* rather than which specific letters wound up in each bucket.
+    assert counts[Status.UNCHANGED] >= 3
+    assert counts[Status.MOVED] + counts[Status.REMOVED] >= 1
+    assert counts[Status.MOVED] + counts[Status.ADDED] >= 1
+
+    out = tmp_path / "diff.step"
+    write_diff(result, out, doc_v2=doc_v2)
+
+    parts_diff = load_parts(out)
+    # Every non-UNCHANGED status that the diff reported must still be visible
+    # by tag in the output's part names — proof that the collapse didn't
+    # absorb or erase those bodies.
+    if counts[Status.MOVED] > 0:
+        assert any("[MOVED]" in p.name for p in parts_diff), "MOVED body lost"
+        assert any("MOVED_FROM" in p.name for p in parts_diff), "MOVED_FROM ghost lost"
+    if counts[Status.REMOVED] > 0:
+        assert any("REMOVED" in p.name for p in parts_diff), "REMOVED body lost"
+    if counts[Status.ADDED] > 0:
+        assert any("ADDED" in p.name for p in parts_diff), "ADDED body lost"
+
+
 def test_cli_help_runs():
     """Smoke-test the CLI entrypoint."""
     from click.testing import CliRunner

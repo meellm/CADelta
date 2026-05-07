@@ -168,11 +168,30 @@ def _attach_baked_as_component(
     if shape_tool.GetReferredShape_s(comp, master) and not master.IsNull():
         _set_name(master, display_name)
         _set_label_color(color_tool, master, rgb)
-    else:
-        # Fallback if the master isn't reachable — set on the component itself.
-        _set_name(comp, display_name)
-        _set_label_color(color_tool, comp, rgb)
+    # ALSO set the display name on the component slot itself. XCAF's auto-
+    # generated component name (a placeholder like ``=>[0:1:1:N]``) takes
+    # precedence over the master's name when the reader later builds each
+    # part's hierarchical ``part.name`` — so without this, the ``[MOVED]``
+    # / ``[ADDED]`` / ``[REMOVED]`` tag is invisible to anything that
+    # walks the assembly tree by component-path (including our own
+    # reader, downstream tooling, and CAD viewers that show component
+    # names in the tree).
+    _set_name(comp, display_name)
     return comp
+
+
+def _color_bucket_key(color):
+    """Round a color tuple to absorb tiny floating-point noise from STEP
+    round-trips so sub-parts that came back with values differing only in the
+    5th-6th decimal still bucket together; truly distinct colors (visible to a
+    human) round to distinct keys.
+
+    ``None`` is its own bucket so colorless parts never silently merge with
+    colored ones (and vice versa).
+    """
+    if color is None:
+        return None
+    return tuple(round(c, 4) for c in color)
 
 
 def _recolor_v2_doc_in_place(diff: DiffResult, doc_v2):
@@ -187,8 +206,17 @@ def _recolor_v2_doc_in_place(diff: DiffResult, doc_v2):
     excision + master-level baked replacement is the only universally
     portable approach.
 
-    Returns the list of entries that need fresh baked replacements. The
-    UNCHANGED majority stays in place, preserving v2's master/instance
+    Returns ``(leftover, kept_unchanged)`` where:
+
+    - ``leftover`` is the list of entries that need fresh baked replacements
+      (ones whose v2 leaf was excised, plus any entries we couldn't address
+      via a label).
+    - ``kept_unchanged`` is the list of ``(entry_str, entries)`` records for
+      v2 leaves that were preserved in place because every entry on them was
+      UNCHANGED. The collapse pass uses this registry to find sibling
+      instance groups that should be merged into a single compound child.
+
+    The UNCHANGED majority stays in place, preserving v2's master/instance
     sharing — that's where the file-size win still comes from.
     """
     from collections import defaultdict
@@ -201,6 +229,10 @@ def _recolor_v2_doc_in_place(diff: DiffResult, doc_v2):
     # compound share one entry, so the value is a list.
     v2_by_entry: dict[str, list[DiffEntry]] = defaultdict(list)
     leftover: list[DiffEntry] = []
+    # Registry of v2 leaves we kept in place because every entry on them was
+    # UNCHANGED. Collected here so the collapse pass can find sibling groups
+    # that share a master shape and merge them into one compound child.
+    kept_unchanged: list[tuple[str, list[DiffEntry]]] = []
 
     for entry in diff.entries:
         if entry.status == Status.REMOVED:
@@ -236,6 +268,7 @@ def _recolor_v2_doc_in_place(diff: DiffResult, doc_v2):
             # tag the component's display name so the diff "[UNCHANGED]"
             # marker is visible in viewers that show label names.
             _prefix_label_name(label, "UNCHANGED")
+            kept_unchanged.append((entry_str, entries))
             continue
 
         # Any non-UNCHANGED entry on this leaf — single status or mixed —
@@ -283,7 +316,180 @@ def _recolor_v2_doc_in_place(diff: DiffResult, doc_v2):
         if XCAFDoc_ShapeTool.IsFree_s(ml):
             shape_tool.RemoveShape(ml)
 
-    return leftover
+    return leftover, kept_unchanged
+
+
+def _collapse_unchanged_instance_groups(doc, kept_unchanged) -> None:
+    """Merge UNCHANGED sibling components that share the same parent assembly,
+    the same master shape, and the same color into a single compound child.
+
+    Targets the "N instances of one part under a parent" pattern (e.g. a
+    ``screw_18`` sub-assembly with N component refs to one screw master).
+    Without this pass each instance comes through as its own XCAF component
+    in the output — the user sees N separate nodes in their CAD viewer's
+    tree even though semantically they were "one component". After this pass
+    those N siblings are replaced by a single compound child of the same
+    parent, restoring the user's original "one component" topology.
+
+    Why this is safe — the guardrails:
+
+    - **Same master required.** Two siblings only collapse if they reference
+      the *same* XCAF master shape. A parent that contains 30 different
+      parts (each with its own master) is left alone even if every child is
+      UNCHANGED. This is the rule that prevents the "whole project under
+      one component" regression.
+    - **UNCHANGED only.** MOVED/ADDED/REMOVED entries are routed through the
+      bake path long before this function runs, so their colors and
+      positions are already encoded as separate baked components elsewhere.
+      Nothing here can erase them.
+    - **Same color required.** Two siblings with different colors are kept
+      separate so colored sub-parts don't lose their identity.
+    - **At least 2 members.** Singletons are passed through untouched —
+      collapse is only worth doing when there's a real grouping.
+
+    Geometry is preserved by *master sharing*: each compound child is a
+    located reference to the original master TShape, not a baked copy.
+    STEP serialization re-uses the master's geometry definition, so file
+    size stays roughly proportional to the original v2.step rather than
+    growing with instance count.
+    """
+    from collections import defaultdict
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ShapeTool
+    from OCP.TDF import TDF_Label
+    from OCP.TopoDS import TopoDS_Compound
+    from OCP.BRep import BRep_Builder
+    from OCP.TDataStd import TDataStd_Name
+    from OCP.TCollection import TCollection_ExtendedString
+    from OCP.TopLoc import TopLoc_Location
+
+    shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+    color_tool = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
+
+    # Bucket kept UNCHANGED leaves by (parent_entry, master_entry, color).
+    # One bucket per (parent, master, color) — different masters or colors
+    # never collapse together.
+    groups: dict = defaultdict(list)
+    for entry_str, entries in kept_unchanged:
+        if not entries:
+            continue
+        label = _lookup_label(doc, entry_str)
+        if label is None or label.IsNull():
+            continue
+        parent = label.Father()
+        if parent.IsNull() or not shape_tool.IsAssembly_s(parent):
+            # Top-level free shape (or non-assembly parent) — leave alone.
+            # Free shapes don't form a "sibling group under a parent assembly"
+            # and collapsing them would change the doc's free-shape topology
+            # in ways the bake path also expects to remain stable.
+            continue
+        master = TDF_Label()
+        if not shape_tool.GetReferredShape_s(label, master) or master.IsNull():
+            continue
+        # Color is taken from the resolved Part (which already accounts for
+        # XCAF inheritance); rounded to absorb STEP round-trip noise.
+        color_key = _color_bucket_key(entries[0].part_v2.color if entries[0].part_v2 else None)
+        key = (_label_entry(parent), _label_entry(master), color_key)
+        groups[key].append((entry_str, entries))
+
+    for (parent_entry_str, master_entry_str, _color), members in groups.items():
+        if len(members) < 2:
+            continue  # singleton group: nothing to collapse
+
+        parent_label = _lookup_label(doc, parent_entry_str)
+        master_label = _lookup_label(doc, master_entry_str)
+        if parent_label is None or master_label is None:
+            continue
+        if parent_label.IsNull() or master_label.IsNull():
+            continue
+
+        master_shape = XCAFDoc_ShapeTool.GetShape_s(master_label)
+        if master_shape.IsNull():
+            continue
+
+        # Build a TopoDS_Compound where each child is the master shape with
+        # the per-instance location applied — same TShape pointer, different
+        # locations. STEP serialization preserves this as MAPPED_ITEM
+        # references, so the compound costs ~one geometry definition plus
+        # N transforms in the output rather than N independent geometries.
+        builder = BRep_Builder()
+        merged = TopoDS_Compound()
+        builder.MakeCompound(merged)
+        for _entry_str, entries in members:
+            comp_label = _lookup_label(doc, _entry_str)
+            if comp_label is None or comp_label.IsNull():
+                continue
+            comp_loc = XCAFDoc_ShapeTool.GetLocation_s(comp_label)
+            builder.Add(merged, master_shape.Located(comp_loc))
+
+        # Make the merged compound a new master in the doc. ``makeAssembly=True``
+        # tells XCAF to expand the compound into a sub-assembly with one
+        # component per located child — each component referring back to the
+        # original master shape. This preserves master/instance sharing in
+        # the STEP output (the master's geometry is serialized once,
+        # referenced N times via transforms). Using ``False`` here would
+        # bake every located child as independent geometry, tripling file
+        # size for assemblies with shared masters — the opposite of what
+        # the user asked for.
+        new_master = shape_tool.AddShape(merged, True)
+        if new_master.IsNull():
+            continue
+        master_name = _label_name_or(master_label, "GROUP")
+        TDataStd_Name.Set_s(
+            new_master,
+            TCollection_ExtendedString(f"[UNCHANGED] {master_name}_x{len(members)}"),
+        )
+
+        # Carry the original master's color forward so the collapsed leaf
+        # renders with the same color users saw on the v2 instances.
+        color = members[0][1][0].part_v2.color if members[0][1] else None
+        if color is not None:
+            _set_label_color(color_tool, new_master, color)
+
+        # Attach the new collapsed master as a single component of the parent
+        # at identity location: every per-instance transform is already
+        # baked into the located children inside the compound master itself,
+        # so the component slot doesn't need its own transform.
+        new_comp = shape_tool.AddComponent(parent_label, new_master, TopLoc_Location())
+        if new_comp.IsNull():
+            # Couldn't add — bail on this group; the original components are
+            # still in place so the diff stays correct, just uncollapsed.
+            shape_tool.RemoveShape(new_master)
+            continue
+        # Tag the component slot too. XCAF auto-generates a placeholder
+        # component name like ``=>[0:1:1:N]`` which would otherwise win over
+        # the master's name when the reader builds the part path — so the
+        # ``[UNCHANGED]`` marker would never reach the leaves' ``part.name``.
+        # Setting it explicitly keeps the marker visible to viewers and
+        # downstream tooling that walks the assembly tree.
+        TDataStd_Name.Set_s(
+            new_comp,
+            TCollection_ExtendedString(f"[UNCHANGED] {master_name}_x{len(members)}"),
+        )
+
+        # Excise the N old component slots; the geometry is already in the
+        # new collapsed compound.
+        for _entry_str, _ in members:
+            comp_label = _lookup_label(doc, _entry_str)
+            if comp_label is None or comp_label.IsNull():
+                continue
+            try:
+                shape_tool.RemoveComponent(comp_label)
+            except Exception:
+                # Couldn't remove this slot — leave it in place; user gets a
+                # duplicated visual but no diff information is lost.
+                pass
+
+
+def _label_name_or(label, fallback: str) -> str:
+    """Read a TDF_Label's name attribute, or return ``fallback`` if unset."""
+    from OCP.TDataStd import TDataStd_Name
+    attr = TDataStd_Name()
+    if label.FindAttribute(TDataStd_Name.GetID_s(), attr):
+        try:
+            return attr.Get().ToExtString() or fallback
+        except Exception:
+            return fallback
+    return fallback
 
 
 def _emit_baked_into_doc(
@@ -357,7 +563,10 @@ def _emit_baked_into_doc(
             individuals.append(entry)
             continue
         if entry.status == Status.UNCHANGED:
-            unchanged_grouped[(part.source_group, part.color)].append(entry)
+            # Bucket key uses a rounded color so STEP round-trip noise (which
+            # can perturb the 5th-6th decimal) doesn't fragment one logical
+            # group into N singletons that demote back to individual labels.
+            unchanged_grouped[(part.source_group, _color_bucket_key(part.color))].append(entry)
         elif entry.status == Status.MOVED:
             moved_grouped[part.source_group].append(entry)
         elif entry.status == Status.ADDED:
@@ -384,8 +593,12 @@ def _emit_baked_into_doc(
         display_name = f"[{status_tag}] {rep_name}" if rep_name else f"[{status_tag}]"
         _emit_label(merged, display_name, rgb_resolver(entries_in_group[0]))
 
-    for (_gid, color), grp in unchanged_grouped.items():
-        rgb = color if color is not None else COLOR_BY_STATUS[Status.UNCHANGED]
+    for _key, grp in unchanged_grouped.items():
+        # Use the actual (un-rounded) color of the first sub-part so we don't
+        # quietly drop precision when emitting; the bucket key was rounded
+        # only for stability of the grouping decision.
+        actual_color = grp[0].part_v2.color
+        rgb = actual_color if actual_color is not None else COLOR_BY_STATUS[Status.UNCHANGED]
         _emit_compound(grp, "UNCHANGED", lambda _e, _rgb=rgb: _rgb)
     for _gid, grp in moved_grouped.items():
         _emit_compound(grp, "MOVED", lambda _e: COLOR_BY_STATUS[Status.MOVED])
@@ -452,7 +665,7 @@ def write_diff(
 
     if doc_v2 is not None:
         doc = doc_v2
-        leftover_v2 = _recolor_v2_doc_in_place(diff, doc)
+        leftover_v2, kept_unchanged = _recolor_v2_doc_in_place(diff, doc)
     else:
         doc = _new_doc()
         # Everything from v2 goes through the bake path.
@@ -462,6 +675,7 @@ def write_diff(
             and e.part_v2 is not None
             and e.part_v2.shape is not None
         ]
+        kept_unchanged = []
 
     removed = [
         e for e in diff.entries
@@ -476,6 +690,15 @@ def write_diff(
         and e.part_v1.shape is not None
     ]
     _emit_baked_into_doc(doc, leftover_v2, removed, moved_ghosts)
+
+    # Collapse pass: merge UNCHANGED sibling instances of one master under
+    # one parent assembly into a single compound child. Runs only when we're
+    # mutating an actual v2 doc (the bake-from-scratch path has no parent
+    # assemblies to collapse under). See the function docstring for the
+    # strict guardrails that prevent collapsing across distinct masters or
+    # absorbing MOVED/ADDED/REMOVED siblings.
+    if doc_v2 is not None and kept_unchanged:
+        _collapse_unchanged_instance_groups(doc, kept_unchanged)
 
     # Rebuild assembly bounds/structure after RemoveComponent and AddComponent
     # mutations so STEP serialization sees a consistent tree. Without this,
