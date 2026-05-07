@@ -388,8 +388,8 @@ def test_diff_step_regroups_unchanged_compound_subshapes(tmp_path: Path):
     Setup: a 5-box compound where the middle box moves +50mm.
     Expected output topology:
       - 1 free COMPOUND containing the 4 unchanged boxes (1 STYLED_ITEM)
-      - 1 free SOLID for the moved box at its v2 position (hot pink)
-      - 1 free SOLID for the moved-from ghost at its v1 position (soft pink)
+      - 1 free SOLID for the moved box at its v2 position (yellow)
+      - 1 free SOLID for the moved-from ghost at its v1 position (hot pink)
       = 3 free shapes total, NOT 5.
     """
     from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ShapeTool
@@ -436,18 +436,18 @@ def test_diff_step_regroups_unchanged_compound_subshapes(tmp_path: Path):
     )
 
     # End-to-end colors after re-load:
-    #   4 unchanged sub-parts (teal) + 1 moved at v2 (hot pink) + 1 moved-from ghost (soft pink)
+    #   4 unchanged sub-parts (teal) + 1 moved at v2 (yellow) + 1 moved-from ghost (hot pink)
     from cadelta.writer import COLOR_MOVED_FROM
     parts_diff = load_parts(out_step)
     assert len(parts_diff) == 6, "expected 4 unchanged + moved + moved-from ghost"
     moved_to = next(p for p in parts_diff if "[MOVED]" in p.name)
     moved_from = next(p for p in parts_diff if "MOVED_FROM" in p.name)
-    hot = COLOR_BY_STATUS[Status.MOVED]
-    soft = COLOR_MOVED_FROM
-    for got, want in zip(moved_to.color, hot):
-        assert abs(got - want) < 0.02, f"moved should be hot pink {hot}, got {moved_to.color}"
-    for got, want in zip(moved_from.color, soft):
-        assert abs(got - want) < 0.02, f"moved-from ghost should be soft pink {soft}, got {moved_from.color}"
+    moved_rgb = COLOR_BY_STATUS[Status.MOVED]
+    ghost_rgb = COLOR_MOVED_FROM
+    for got, want in zip(moved_to.color, moved_rgb):
+        assert abs(got - want) < 0.02, f"moved should be {moved_rgb}, got {moved_to.color}"
+    for got, want in zip(moved_from.color, ghost_rgb):
+        assert abs(got - want) < 0.02, f"moved-from ghost should be {ghost_rgb}, got {moved_from.color}"
     unchanged = [p for p in parts_diff if "UNCHANGED" in p.name]
     assert len(unchanged) == 4
     for p in unchanged:
@@ -460,8 +460,8 @@ def test_diff_step_regroups_unchanged_compound_subshapes(tmp_path: Path):
 
 def test_moved_part_emits_v1_ghost_and_v2_new_position(tmp_path: Path):
     """A MOVED part should appear TWICE in diff.step:
-      - hot pink at the new v2 world-space position, and
-      - soft pink (COLOR_MOVED_FROM) at the old v1 world-space position.
+      - yellow at the new v2 world-space position, and
+      - hot pink (COLOR_MOVED_FROM) at the old v1 world-space position.
     The two entries let users visually trace where each moved part came from."""
     from cadelta.writer import COLOR_MOVED_FROM
 
@@ -491,9 +491,9 @@ def test_moved_part_emits_v1_ghost_and_v2_new_position(tmp_path: Path):
     assert moved_to[0].centroid == pytest.approx([37.5, 7.5, 7.5], abs=1e-6)
     assert moved_from[0].centroid == pytest.approx([7.5, 7.5, 7.5], abs=1e-6)
 
-    # Colors: hot pink at v2, soft pink at v1 ghost.
-    hot = COLOR_BY_STATUS[Status.MOVED]
-    for got, want in zip(moved_to[0].color, hot):
+    # Colors: yellow at v2 new position, hot pink at v1 ghost.
+    moved_rgb = COLOR_BY_STATUS[Status.MOVED]
+    for got, want in zip(moved_to[0].color, moved_rgb):
         assert abs(got - want) < 0.02
     for got, want in zip(moved_from[0].color, COLOR_MOVED_FROM):
         assert abs(got - want) < 0.02

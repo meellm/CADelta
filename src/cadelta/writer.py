@@ -11,17 +11,17 @@ from .reader import Part, _label_entry
 # is the gray fallback applied only when the v2 part has no color attribute set.
 COLOR_BY_STATUS = {
     Status.ADDED: (0.00, 0.80, 0.95),      # cyan
-    Status.MOVED: (1.00, 0.05, 0.50),      # hot pink (high-contrast: the NEW position)
+    Status.MOVED: (1.00, 0.95, 0.00),      # high-contrast yellow (the NEW position)
     Status.REMOVED: (1.00, 0.00, 0.00),    # pure red (high-contrast)
     Status.UNCHANGED: (0.60, 0.60, 0.60),  # gray (fallback only)
 }
 
-# Ghost color rendered at the OLD (v1) position of a moved part: a softer,
-# lower-contrast pink that visually pairs with COLOR_BY_STATUS[Status.MOVED]
-# while staying clearly subordinate to it. The high-contrast pink at v2's new
-# position is what the user's eye should be drawn to; the ghost answers
-# "where did it come from?".
-COLOR_MOVED_FROM = (1.00, 0.65, 0.80)
+# Ghost color rendered at the OLD (v1) position of a moved part: hot pink.
+# The high-contrast yellow at v2's new position is what the user's eye should
+# be drawn to; the pink ghost answers "where did it come from?" — bright
+# enough to spot but distinct from the yellow so the new-vs-old pairing is
+# instantly readable.
+COLOR_MOVED_FROM = (1.00, 0.05, 0.50)
 
 def _new_doc():
     from OCP.TDocStd import TDocStd_Document
