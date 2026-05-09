@@ -11,15 +11,23 @@ dependencies = [
     "cadquery-ocp>=7.7",
     "numpy",
     "click",
+    # GUI runtime deps. Tkinter ships with CPython but tkinterdnd2 (drag-drop)
+    # and openpyxl (Excel report) are pip-only.
+    "tkinterdnd2>=0.3",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7",
+    # Used to build the desktop .exe via build/cadelta_gui.spec; not needed
+    # to run the app itself, only to bundle it.
+    "pyinstaller>=6.0",
 ]
 
 [project.scripts]
 cadelta = "cadelta.cli:main"
+cadelta-gui = "cadelta.gui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

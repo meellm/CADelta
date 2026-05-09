@@ -641,6 +641,9 @@ def write_diff(
     out_step: Path,
     doc_v2=None,
     out_gltf: Optional[Path] = None,
+    *,
+    include_removed: bool = True,
+    include_moved_ghost: bool = True,
 ) -> None:
     """Serialize a diff to a colored STEP file (and optionally a glTF/GLB).
 
@@ -655,6 +658,19 @@ def write_diff(
     Parts directly without a doc), every output label is built from baked
     geometry. This is correct but produces ~4× larger files for assemblies with
     repeated parts, because master/instance sharing is lost during baking.
+
+    Optional flags:
+
+    - ``include_removed`` — when False, REMOVED parts are omitted from the
+      output entirely. The matching DiffEntries still exist in ``diff`` (and
+      can be rendered by other tooling, e.g. a JSON or Excel report); they
+      just don't get a baked body in the STEP. Default True keeps the
+      existing red overlay behavior.
+    - ``include_moved_ghost`` — when False, the soft "moved from" ghost at
+      v1's old position is omitted. The MOVED part at v2's new position is
+      still emitted (asymmetric: this flag only suppresses the v1 ghost,
+      not the diff entry itself). Default True keeps the existing pink
+      ghost overlay.
     """
     from OCP.STEPCAFControl import STEPCAFControl_Writer
     from OCP.STEPControl import STEPControl_AsIs
@@ -677,18 +693,26 @@ def write_diff(
         ]
         kept_unchanged = []
 
-    removed = [
-        e for e in diff.entries
-        if e.status == Status.REMOVED
-        and e.part_v1 is not None
-        and e.part_v1.shape is not None
-    ]
-    moved_ghosts = [
-        e for e in diff.entries
-        if e.status == Status.MOVED
-        and e.part_v1 is not None
-        and e.part_v1.shape is not None
-    ]
+    removed = (
+        [
+            e for e in diff.entries
+            if e.status == Status.REMOVED
+            and e.part_v1 is not None
+            and e.part_v1.shape is not None
+        ]
+        if include_removed
+        else []
+    )
+    moved_ghosts = (
+        [
+            e for e in diff.entries
+            if e.status == Status.MOVED
+            and e.part_v1 is not None
+            and e.part_v1.shape is not None
+        ]
+        if include_moved_ghost
+        else []
+    )
     _emit_baked_into_doc(doc, leftover_v2, removed, moved_ghosts)
 
     # Collapse pass: merge UNCHANGED sibling instances of one master under

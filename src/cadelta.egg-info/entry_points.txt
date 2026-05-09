@@ -1,2 +1,3 @@
 [console_scripts]
 cadelta = cadelta.cli:main
+cadelta-gui = cadelta.gui.app:main

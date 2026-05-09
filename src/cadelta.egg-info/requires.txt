@@ -1,6 +1,9 @@
 cadquery-ocp>=7.7
 numpy
 click
+tkinterdnd2>=0.3
+openpyxl>=3.1
 
 [dev]
 pytest>=7
+pyinstaller>=6.0

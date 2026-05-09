@@ -1,0 +1,107 @@
+# Release workflow: when a version tag is pushed (e.g. ``v0.2.0``), run the
+# tests once on Windows, build CADelta.exe, and attach it to a public
+# GitHub Release that users can download from
+# ``github.com/<owner>/<repo>/releases/latest``.
+#
+# Usage:
+#   1. Bump the version in pyproject.toml.
+#   2. Commit and push to main.
+#   3. Tag the commit:  ``git tag v0.2.0 && git push origin v0.2.0``
+#   4. This workflow runs automatically; .exe shows up on the Releases page
+#      ~5-10 minutes later.
+#
+# Manual trigger: ``workflow_dispatch`` lets you run the build from the
+# Actions tab without tagging — useful for testing the workflow itself.
+# Manual runs upload the .exe as a workflow artifact, NOT a public release
+# (we don't want test runs polluting the Releases page).
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"   # any tag starting with ``v`` — v0.1.0, v1.0, v2.3.4-rc1, etc.
+  workflow_dispatch:   # manual button in the Actions UI
+
+# Default GITHUB_TOKEN can read the repo, but creating a Release requires
+# write access to the repo's contents. Scoped narrowly to this workflow.
+permissions:
+  contents: write
+
+jobs:
+  build-windows-exe:
+    name: Build CADelta.exe (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run tests
+        # Sanity check — refuse to ship a build that fails its own suite.
+        # This is a last line of defense; CI on the corresponding commit
+        # should already have run via ci.yml.
+        run: pytest tests/
+
+      - name: Build CADelta.exe via PyInstaller
+        # build/build_exe.py runs ``pyinstaller --clean --noconfirm`` against
+        # build/cadelta_gui.spec. Output: dist/CADelta.exe (~180-230 MB).
+        run: python build/build_exe.py
+
+      - name: Verify the .exe exists
+        # Defensive: PyInstaller can exit 0 even when output is missing if
+        # the spec has a typo. Catch it here so the upload step doesn't
+        # fail with a confusing "file not found" error.
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/CADelta.exe")) {
+            Write-Error "dist/CADelta.exe was not produced by PyInstaller"
+            exit 1
+          }
+          Get-Item dist/CADelta.exe | Format-List Name, Length, LastWriteTime
+
+      - name: Upload .exe as workflow artifact
+        # Always-on regardless of trigger: artifacts are downloadable from
+        # the Actions run page for 90 days. Useful for testing manual
+        # ``workflow_dispatch`` runs that don't create a public Release.
+        uses: actions/upload-artifact@v4
+        with:
+          name: CADelta-windows-x64
+          path: dist/CADelta.exe
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Attach .exe to a GitHub Release
+        # Only fires for tag pushes, not manual workflow_dispatch — manual
+        # runs publish only as a workflow artifact above.
+        # softprops/action-gh-release auto-creates the release from the tag
+        # name and uploads ``files`` as release assets.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Release notes: GitHub auto-generates from commits + PRs since
+          # the previous tag. Override by setting body / body_path here if
+          # you want hand-crafted notes.
+          generate_release_notes: true
+          # The asset users will click to download. Keep the filename
+          # version-agnostic so a stable URL like
+          # github.com/.../releases/latest/download/CADelta.exe works.
+          files: dist/CADelta.exe
+          # Mark as draft to review before publishing? Set to ``true`` if
+          # you want manual approval; left ``false`` so the release is
+          # immediately public when the tag is pushed.
+          draft: false
+          # Pre-release tags: any tag containing a hyphen (e.g. v1.0-rc1)
+          # is auto-flagged as pre-release so users on the Releases page
+          # can tell the difference from stable releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}

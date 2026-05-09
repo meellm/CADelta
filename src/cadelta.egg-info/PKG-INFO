@@ -7,6 +7,9 @@ License-File: LICENSE
 Requires-Dist: cadquery-ocp>=7.7
 Requires-Dist: numpy
 Requires-Dist: click
+Requires-Dist: tkinterdnd2>=0.3
+Requires-Dist: openpyxl>=3.1
 Provides-Extra: dev
 Requires-Dist: pytest>=7; extra == "dev"
+Requires-Dist: pyinstaller>=6.0; extra == "dev"
 Dynamic: license-file
