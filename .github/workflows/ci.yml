@@ -43,6 +43,12 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      - name: Install Linux Qt runtime deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1
+
       - name: Install package + dev deps
         # `-e ".[dev]"` installs CADelta in editable mode plus pytest +
         # pyinstaller. PyInstaller isn't used in CI tests but the [dev]
