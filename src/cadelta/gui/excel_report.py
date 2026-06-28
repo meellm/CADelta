@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Iterable
 
 from cadelta.matcher import DiffEntry, DiffResult, Status
-from cadelta.writer import COLOR_BY_STATUS, COLOR_MOVED_FROM
+from cadelta.writer import COLOR_BY_STATUS
 
 
 # Header row for the Parts sheet. Kept as a module constant so the test can

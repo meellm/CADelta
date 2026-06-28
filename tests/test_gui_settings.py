@@ -1,13 +1,11 @@
 """Settings round-trip + tolerance tests for :mod:`cadelta.gui.settings`.
 
-No Tk imports — these are pure-Python tests on the persistence layer the GUI
+No Qt imports: these are pure-Python tests on the persistence layer the GUI
 relies on between runs.
 """
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 
 from cadelta.gui.defaults import DEFAULT_COLORS
 from cadelta.gui.settings import (
@@ -51,15 +49,15 @@ def test_settings_roundtrip(tmp_path: Path):
 
 
 def test_settings_load_missing_file_returns_defaults(tmp_path: Path):
-    """No settings file yet → caller gets a fresh defaults object, no
-    exception, no logging spam."""
+    """No settings file yet: caller gets a fresh defaults object, no
+    exception."""
     path = tmp_path / "does_not_exist.json"
     state = load_settings(path)
     assert state == SettingsState()
 
 
 def test_settings_load_malformed_json_returns_defaults(tmp_path: Path):
-    """Hand-edited file got corrupted → defaults rather than a crash."""
+    """Hand-edited file got corrupted: defaults rather than a crash."""
     path = tmp_path / "broken.json"
     path.write_text("this is not json {")
     state = load_settings(path)
@@ -68,8 +66,8 @@ def test_settings_load_malformed_json_returns_defaults(tmp_path: Path):
 
 def test_settings_load_partial_dict_uses_defaults_for_missing_keys(tmp_path: Path):
     """A settings file written by an older app version that doesn't have
-    every field yet must still load — missing keys fall back to defaults
-    so we never break forward-compat on a minor schema change."""
+    every field yet must still load: missing keys fall back to defaults so a
+    minor schema change stays forward-compatible."""
     path = tmp_path / "partial.json"
     # Only tol_mm specified; everything else should default.
     path.write_text('{"tol_mm": 0.5}')
@@ -94,8 +92,8 @@ def test_settings_save_uses_atomic_replace(tmp_path: Path):
 
 def test_status_setting_color_recovers_from_garbage(tmp_path: Path):
     """A truncated/corrupted color value falls back to the supplied default
-    rather than raising — important so a user's typo in their hand-edited
-    settings doesn't brick the GUI."""
+    rather than raising, so a typo in a hand-edited settings file does not
+    break the GUI."""
     parsed = StatusSetting.from_json(
         {"enabled": True, "color": "not-a-list"},
         default_color=DEFAULT_COLORS["moved"],

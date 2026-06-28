@@ -1,5 +1,5 @@
-"""Worker smoke tests — exercise the full diff pipeline through the GUI's
-worker module without any Tk imports. Verifies the queue protocol is well
+"""Worker smoke tests: exercise the full diff pipeline through the GUI's
+worker module without any Qt imports. Verifies the queue protocol is well
 formed, settings translate to the right writer state, and the optional
 JSON/Excel outputs land at the right paths.
 """
@@ -54,7 +54,7 @@ def test_worker_runs_diff_and_emits_done_message(tmp_path: Path):
 
     q: "queue.Queue" = queue.Queue()
     job = DiffJob(v1_path=v1, v2_path=v2, out_step=out_step, settings=SettingsState())
-    run_diff_job(job, q)  # synchronous call — easier to assert in tests
+    run_diff_job(job, q)  # synchronous call, easier to assert in tests
 
     msgs = _drain(q)
     # At least the four phases (read v1, read v2, diff, write).
@@ -70,7 +70,7 @@ def test_worker_runs_diff_and_emits_done_message(tmp_path: Path):
     assert d.out_step == out_step
     assert out_step.exists() and out_step.stat().st_size > 0
     assert d.counts is not None
-    # Sanity on counts — at minimum we have one moved + one removed + one added.
+    # Sanity on counts: at minimum one moved, one removed, and one added.
     assert d.counts[Status.UNCHANGED.value] >= 1
     assert d.counts[Status.MOVED.value] == 1
     assert d.counts[Status.ADDED.value] == 1
@@ -97,10 +97,9 @@ def test_worker_writes_json_and_excel_when_enabled(tmp_path: Path):
 
 
 def test_worker_omits_removed_and_ghost_when_unticked(tmp_path: Path):
-    """REMOVED and MOVED_FROM ticks off → those bodies are absent from the
-    output STEP. The writer-flag tests already cover the engine wiring; this
-    test pins down that the worker correctly translates SettingsState into
-    those flags."""
+    """REMOVED and MOVED_FROM ticks off: those bodies are absent from the
+    output STEP. The writer-flag tests cover the engine wiring; this pins down
+    that the worker translates SettingsState into those flags."""
     from cadelta.reader import load_parts
 
     v1, v2 = _build_pair(tmp_path)
@@ -125,7 +124,7 @@ def test_worker_omits_removed_and_ghost_when_unticked(tmp_path: Path):
 
 
 def test_worker_applies_custom_color_when_ticked(tmp_path: Path):
-    """ADDED ticked + custom color → the rendered ADDED body carries that
+    """ADDED ticked with a custom color: the rendered ADDED body carries that
     color. Restore the writer's default afterwards because the dict is a
     shared singleton."""
     from cadelta.reader import load_parts
@@ -154,8 +153,8 @@ def test_worker_applies_custom_color_when_ticked(tmp_path: Path):
 
 
 def test_worker_emits_error_message_on_unreadable_step(tmp_path: Path):
-    """Bad STEP file → worker doesn't crash; queue ends with ErrorMessage,
-    not DoneMessage. The Tk thread relies on this contract to re-enable the
+    """Bad STEP file: worker doesn't crash; queue ends with ErrorMessage, not
+    DoneMessage. The GUI thread relies on this contract to re-enable the
     Compare button on failure."""
     bad = tmp_path / "broken.step"
     bad.write_text("this is definitely not a STEP file")

@@ -1,193 +1,211 @@
-"""Settings page: per-status checkbox + color picker rows, output toggles,
-tolerance fields, and a Save button that swaps back to the main view.
+"""Settings page: per-status enable + color rows, output toggles, tolerance
+fields, and Save / Back actions.
 
-Tick semantics (per user spec, mirrored in :mod:`cadelta.gui.worker`):
+Tick semantics (mirrored in :mod:`cadelta.gui.worker`):
 
-- MOVED / ADDED unticked → use the writer's default color, still rendered.
-- REMOVED / MOVED_FROM unticked → omit those bodies from the output.
+- MOVED / ADDED unticked: use the writer's default color, still rendered.
+- REMOVED / MOVED_FROM unticked: omit those bodies from the output.
 """
 from __future__ import annotations
 
-import tkinter as tk
-from tkinter import colorchooser, ttk
-from typing import Callable, Tuple
+from typing import Callable
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QColorDialog,
+    QDoubleSpinBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .settings import RGB, SettingsState, StatusSetting
+from .theme import color as token
 
 
-_BG = "#f4f4f4"
-_TEXT = "#222222"
-_TEXT_MUTED = "#666666"
-_DIVIDER = "#dcdcdc"
-
-
-def _rgb_to_hex(rgb: RGB) -> str:
-    """Convert (0..1, 0..1, 0..1) → ``#rrggbb`` for Tk widgets."""
+def _rgb_to_qcolor(rgb: RGB) -> QColor:
     r, g, b = (max(0, min(255, round(c * 255))) for c in rgb)
-    return f"#{r:02x}{g:02x}{b:02x}"
+    return QColor(r, g, b)
 
 
-def _hex_to_rgb(hex_str: str) -> RGB:
-    h = hex_str.lstrip("#")
-    return (int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0, int(h[4:6], 16) / 255.0)
+def _qcolor_to_rgb(c: QColor) -> RGB:
+    return (c.red() / 255.0, c.green() / 255.0, c.blue() / 255.0)
 
 
-class _StatusRow(tk.Frame):
-    """One row in the colors section: [✓ tick] [LABEL] [color swatch] [Pick…]."""
+class _StatusRow(QWidget):
+    """One row: [enable] [LABEL] ... [color swatch] [Pick...]."""
 
-    def __init__(self, parent: tk.Widget, label: str, setting: StatusSetting):
-        super().__init__(parent, bg=_BG)
-        self._setting = setting
+    def __init__(self, label: str, setting: StatusSetting) -> None:
+        super().__init__()
+        self._color: RGB = setting.color
 
-        # Tk's ``BooleanVar`` is the cleanest way to bind a checkbutton.
-        self._enabled_var = tk.BooleanVar(value=setting.enabled)
-        chk = ttk.Checkbutton(self, variable=self._enabled_var)
-        chk.grid(row=0, column=0, padx=(0, 8))
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
 
-        lbl = tk.Label(self, text=label, bg=_BG, fg=_TEXT, width=14, anchor="w")
-        lbl.grid(row=0, column=1, sticky="w")
+        self._check = QCheckBox()
+        self._check.setChecked(setting.enabled)
+        row.addWidget(self._check)
 
-        # Swatch is a tk.Frame with the color as bg — small, framed.
-        self._swatch = tk.Frame(
-            self, width=28, height=18,
-            bg=_rgb_to_hex(setting.color),
-            highlightthickness=1, highlightbackground="#999999",
+        name = QLabel(label)
+        name.setMinimumWidth(120)
+        row.addWidget(name)
+        row.addStretch(1)
+
+        self._swatch = QPushButton()
+        self._swatch.setObjectName("swatch")
+        self._swatch.setCursor(Qt.PointingHandCursor)
+        self._swatch.clicked.connect(self._pick_color)
+        self._apply_swatch()
+        row.addWidget(self._swatch)
+
+        pick = QPushButton("Pick...")
+        pick.setCursor(Qt.PointingHandCursor)
+        pick.clicked.connect(self._pick_color)
+        row.addWidget(pick)
+
+    def _apply_swatch(self) -> None:
+        c = _rgb_to_qcolor(self._color)
+        # Per-widget background; the #swatch QSS rule supplies border + size.
+        self._swatch.setStyleSheet(
+            f"QPushButton#swatch {{ background: {c.name()};"
+            f" border: 1px solid {token('border_strong')}; }}"
         )
-        # Stop the frame collapsing to its content's natural size.
-        self._swatch.grid_propagate(False)
-        self._swatch.grid(row=0, column=2, padx=(0, 8))
-
-        pick = ttk.Button(self, text="Pick…", width=8, command=self._pick_color)
-        pick.grid(row=0, column=3)
-
-        self.columnconfigure(1, weight=1)
 
     def _pick_color(self) -> None:
-        # Tk's color chooser returns ((r, g, b), "#rrggbb") in 0..255 ints.
-        # The hex string is the most reliable form to round-trip.
-        result = colorchooser.askcolor(
-            initialcolor=_rgb_to_hex(self._setting.color),
-            title="Pick a color",
+        picked = QColorDialog.getColor(
+            _rgb_to_qcolor(self._color), self, "Pick a color"
         )
-        if result is None or result[1] is None:
-            return  # user cancelled
-        new_rgb = _hex_to_rgb(result[1])
-        self._setting = StatusSetting(enabled=self._enabled_var.get(), color=new_rgb)
-        self._swatch.configure(bg=result[1])
+        if not picked.isValid():
+            return  # cancelled
+        self._color = _qcolor_to_rgb(picked)
+        self._apply_swatch()
 
     def current(self) -> StatusSetting:
-        """Return the row's live state, including the latest tick value."""
-        return StatusSetting(enabled=self._enabled_var.get(), color=self._setting.color)
+        return StatusSetting(enabled=self._check.isChecked(), color=self._color)
 
 
-class SettingsView(tk.Frame):
-    """The whole settings page. Built on demand each time the gear icon is
-    clicked — cheap (no heavy state) and keeps widget references local.
-
-    Calls ``on_save`` with the new SettingsState when the user clicks Save,
-    ``on_back`` when they click ← Back without saving.
-    """
+class SettingsView(QWidget):
+    """Whole settings page. Calls ``on_save`` with a fresh SettingsState on
+    Save, ``on_back`` on Back (discarding edits)."""
 
     def __init__(
         self,
-        parent: tk.Widget,
         settings: SettingsState,
         on_save: Callable[[SettingsState], None],
         on_back: Callable[[], None],
-    ):
-        super().__init__(parent, bg=_BG)
+    ) -> None:
+        super().__init__()
         self._settings = settings
         self._on_save = on_save
         self._on_back = on_back
         self._build()
 
     def _build(self) -> None:
-        # Header bar with Back button (left) and section title (centered).
-        header = tk.Frame(self, bg=_BG)
-        header.pack(fill="x", padx=12, pady=(8, 0))
-        back = ttk.Button(header, text="← Back", command=self._on_back)
-        back.pack(side="left")
-        title = tk.Label(header, text="Settings", bg=_BG, fg=_TEXT,
-                         font=("TkDefaultFont", 12, "bold"))
-        title.pack(side="left", padx=12)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 14, 20, 18)
+        outer.setSpacing(14)
 
-        body = tk.Frame(self, bg=_BG)
-        body.pack(fill="both", expand=True, padx=20, pady=12)
+        # Header: back + title.
+        header = QHBoxLayout()
+        back = QPushButton("Back")
+        back.setObjectName("ghost")
+        back.setCursor(Qt.PointingHandCursor)
+        back.clicked.connect(self._on_back)
+        header.addWidget(back)
+        title = QLabel("Settings")
+        title.setProperty("role", "title")
+        header.addWidget(title)
+        header.addStretch(1)
+        outer.addLayout(header)
 
-        # --- Colors section -----------------------------------------------
-        tk.Label(
-            body, text="Diff colors", bg=_BG, fg=_TEXT,
-            font=("TkDefaultFont", 11, "bold"),
-        ).pack(anchor="w")
-
-        self._row_moved = _StatusRow(body, "MOVED", self._settings.moved)
-        self._row_added = _StatusRow(body, "ADDED", self._settings.added)
-        self._row_removed = _StatusRow(body, "REMOVED", self._settings.removed)
-        self._row_moved_from = _StatusRow(body, "MOVED_FROM", self._settings.moved_from)
+        # --- Diff colors ---------------------------------------------------
+        outer.addWidget(self._section_label("Diff colors"))
+        colors_card = self._card()
+        cv = QVBoxLayout(colors_card)
+        cv.setSpacing(8)
+        self._row_moved = _StatusRow("MOVED", self._settings.moved)
+        self._row_added = _StatusRow("ADDED", self._settings.added)
+        self._row_removed = _StatusRow("REMOVED", self._settings.removed)
+        self._row_moved_from = _StatusRow("MOVED_FROM", self._settings.moved_from)
         for r in (self._row_moved, self._row_added, self._row_removed, self._row_moved_from):
-            r.pack(fill="x", pady=2)
+            cv.addWidget(r)
+        outer.addWidget(colors_card)
 
-        note = tk.Label(
-            body,
-            text=(
-                "• Unticking REMOVED or MOVED_FROM omits those bodies from the output.\n"
-                "• Unticking MOVED or ADDED keeps them in the output but uses the\n"
-                "  default color instead of your picked one."
-            ),
-            bg=_BG, fg=_TEXT_MUTED, justify="left",
-            font=("TkDefaultFont", 9),
+        note = QLabel(
+            "Unticking REMOVED or MOVED_FROM omits those bodies from the output.\n"
+            "Unticking MOVED or ADDED keeps them but uses the default color."
         )
-        note.pack(anchor="w", pady=(4, 0))
+        note.setProperty("role", "hint")
+        note.setWordWrap(True)
+        outer.addWidget(note)
 
-        ttk.Separator(body, orient="horizontal").pack(fill="x", pady=12)
+        # --- Extra outputs -------------------------------------------------
+        outer.addWidget(self._section_label("Extra outputs"))
+        outputs_card = self._card()
+        ov = QVBoxLayout(outputs_card)
+        ov.setSpacing(8)
+        self._json_check = QCheckBox("Write JSON report (alongside diff.step)")
+        self._json_check.setChecked(self._settings.write_json_report)
+        self._xlsx_check = QCheckBox("Write Excel report (alongside diff.step)")
+        self._xlsx_check.setChecked(self._settings.write_excel_report)
+        ov.addWidget(self._json_check)
+        ov.addWidget(self._xlsx_check)
+        outer.addWidget(outputs_card)
 
-        # --- Outputs section ----------------------------------------------
-        tk.Label(
-            body, text="Extra outputs", bg=_BG, fg=_TEXT,
-            font=("TkDefaultFont", 11, "bold"),
-        ).pack(anchor="w")
-        self._json_var = tk.BooleanVar(value=self._settings.write_json_report)
-        self._xlsx_var = tk.BooleanVar(value=self._settings.write_excel_report)
-        ttk.Checkbutton(
-            body, variable=self._json_var,
-            text="Write JSON report (alongside diff.step)",
-        ).pack(anchor="w", pady=2)
-        ttk.Checkbutton(
-            body, variable=self._xlsx_var,
-            text="Write Excel report (alongside diff.step)",
-        ).pack(anchor="w", pady=2)
+        # --- Tolerances ----------------------------------------------------
+        outer.addWidget(self._section_label("Tolerances"))
+        tol_card = self._card()
+        tg = QGridLayout(tol_card)
+        tg.setHorizontalSpacing(12)
+        tg.setVerticalSpacing(8)
+        tg.addWidget(QLabel("Translation (mm)"), 0, 0)
+        self._tol_mm = self._tol_spin(self._settings.tol_mm)
+        tg.addWidget(self._tol_mm, 0, 1)
+        tg.addWidget(QLabel("Rotation (deg)"), 1, 0)
+        self._tol_deg = self._tol_spin(self._settings.tol_deg)
+        tg.addWidget(self._tol_deg, 1, 1)
+        tg.setColumnStretch(2, 1)
+        outer.addWidget(tol_card)
 
-        ttk.Separator(body, orient="horizontal").pack(fill="x", pady=12)
+        outer.addStretch(1)
 
-        # --- Tolerances ---------------------------------------------------
-        tk.Label(
-            body, text="Tolerances", bg=_BG, fg=_TEXT,
-            font=("TkDefaultFont", 11, "bold"),
-        ).pack(anchor="w")
+        # --- Save ----------------------------------------------------------
+        save = QPushButton("Save")
+        save.setObjectName("primary")
+        save.setCursor(Qt.PointingHandCursor)
+        save.clicked.connect(self._save)
+        outer.addWidget(save)
 
-        tol_row = tk.Frame(body, bg=_BG)
-        tol_row.pack(fill="x", pady=4)
-        tk.Label(tol_row, text="Translation (mm):", bg=_BG, fg=_TEXT,
-                 width=20, anchor="w").grid(row=0, column=0, sticky="w")
-        self._tol_mm_var = tk.StringVar(value=f"{self._settings.tol_mm:g}")
-        ttk.Entry(tol_row, textvariable=self._tol_mm_var, width=10).grid(row=0, column=1)
-        tk.Label(tol_row, text="Rotation (deg):", bg=_BG, fg=_TEXT,
-                 width=20, anchor="w").grid(row=1, column=0, sticky="w", pady=(4, 0))
-        self._tol_deg_var = tk.StringVar(value=f"{self._settings.tol_deg:g}")
-        ttk.Entry(tol_row, textvariable=self._tol_deg_var, width=10).grid(row=1, column=1, pady=(4, 0))
+    # --- small builders ----------------------------------------------------
 
-        # --- Save button --------------------------------------------------
-        save_row = tk.Frame(self, bg=_BG)
-        save_row.pack(fill="x", pady=(0, 12))
-        ttk.Button(save_row, text="Save", command=self._save).pack()
+    @staticmethod
+    def _section_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setProperty("role", "section")
+        return lbl
 
-    def _parse_float(self, var: tk.StringVar, fallback: float) -> float:
-        """Tolerant float parse — empty / malformed input keeps the fallback
-        so the user doesn't get an error popup mid-edit."""
-        try:
-            return float(var.get())
-        except (ValueError, TypeError):
-            return fallback
+    @staticmethod
+    def _card() -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        return card
+
+    @staticmethod
+    def _tol_spin(value: float) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setDecimals(3)
+        spin.setRange(0.0, 1000.0)
+        spin.setSingleStep(0.01)
+        spin.setValue(value)
+        spin.setFixedWidth(110)
+        return spin
 
     def _save(self) -> None:
         new_state = SettingsState(
@@ -195,9 +213,9 @@ class SettingsView(tk.Frame):
             added=self._row_added.current(),
             removed=self._row_removed.current(),
             moved_from=self._row_moved_from.current(),
-            write_json_report=self._json_var.get(),
-            write_excel_report=self._xlsx_var.get(),
-            tol_mm=self._parse_float(self._tol_mm_var, self._settings.tol_mm),
-            tol_deg=self._parse_float(self._tol_deg_var, self._settings.tol_deg),
+            write_json_report=self._json_check.isChecked(),
+            write_excel_report=self._xlsx_check.isChecked(),
+            tol_mm=self._tol_mm.value(),
+            tol_deg=self._tol_deg.value(),
         )
         self._on_save(new_state)

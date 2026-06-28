@@ -1,0 +1,39 @@
+# Virtual environment
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pytest cache
+.pytest_cache/
+
+# PyInstaller output. The build/ directory itself is tracked (it holds
+# build_exe.py and cadelta_gui.spec); only PyInstaller's generated work
+# folder and the final bundle are ignored.
+/build/cadelta_gui/
+/dist/
+
+# Local diff scratch - outputs produced by running CADelta in the repo root.
+diff.step
+diff.glb
+diff.json

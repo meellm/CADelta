@@ -1,102 +1,93 @@
 """CADelta desktop GUI entry point.
 
-Starts a TkinterDnD root window, loads persisted settings, and routes
-between the main view and the settings page (same window, swapped via
-``pack_forget``/``pack``). Run via ``python -m cadelta.gui.app`` or the
-``cadelta-gui`` console script defined in ``pyproject.toml``.
+Builds a PySide6 QApplication, applies the dark theme, and shows a QMainWindow
+that swaps between the main view and the settings page via a QStackedWidget.
+Run via ``python -m cadelta.gui.app`` or the ``cadelta-gui`` console script
+defined in ``pyproject.toml``.
 """
 from __future__ import annotations
 
 import sys
-import tkinter as tk
 from typing import Optional
 
-from tkinterdnd2 import TkinterDnD
+from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
 
 from .main_view import MainView
 from .settings import SettingsState, load_settings, save_settings
 from .settings_view import SettingsView
+from .theme import apply_theme
 
 
 _WINDOW_TITLE = "CADelta"
+_WINDOW_W = 720
+_WINDOW_H = 540
 _WINDOW_MIN_W = 560
-_WINDOW_MIN_H = 360
-_BG = "#f4f4f4"
+_WINDOW_MIN_H = 460
 
 
-class App:
-    """Top-level application controller. Owns the root window and the
-    current SettingsState; swaps the visible view between MainView and
-    SettingsView in response to user actions.
-    """
+class MainWindow(QMainWindow):
+    """Top-level window. Owns the current :class:`SettingsState` and routes
+    between MainView and SettingsView in a single stacked widget."""
 
     def __init__(self) -> None:
-        # TkinterDnD.Tk extends tk.Tk with drag-and-drop support — drop-in
-        # replacement; everything else (geometry managers, widget classes)
-        # works the same.
-        self._root = TkinterDnD.Tk()
-        self._root.title(_WINDOW_TITLE)
-        self._root.minsize(_WINDOW_MIN_W, _WINDOW_MIN_H)
-        self._root.configure(bg=_BG)
-
-        # Sensible default size — 640×420 fits both views without scrolling
-        # but can be resized larger.
-        self._root.geometry("640x420")
+        super().__init__()
+        self.setWindowTitle(_WINDOW_TITLE)
+        self.resize(_WINDOW_W, _WINDOW_H)
+        self.setMinimumSize(_WINDOW_MIN_W, _WINDOW_MIN_H)
 
         self._settings: SettingsState = load_settings()
-        self._main_view: Optional[MainView] = None
+
+        self._stack = QStackedWidget()
+        self._stack.setObjectName("root")
+        self.setCentralWidget(self._stack)
+
+        self._main_view = MainView(self._settings, on_open_settings=self._show_settings)
+        self._stack.addWidget(self._main_view)
+
         self._settings_view: Optional[SettingsView] = None
+        self._stack.setCurrentWidget(self._main_view)
 
-        self._show_main()
-
-    # --- view routing ------------------------------------------------------
-
-    def _show_main(self) -> None:
-        if self._settings_view is not None:
-            self._settings_view.pack_forget()
-            self._settings_view.destroy()
-            self._settings_view = None
-        if self._main_view is None:
-            self._main_view = MainView(
-                self._root,
-                settings=self._settings,
-                on_open_settings=self._show_settings,
-            )
-        else:
-            # Re-sync if settings were edited.
-            self._main_view.refresh_after_settings(self._settings)
-        self._main_view.pack(fill="both", expand=True)
+    # --- routing ----------------------------------------------------------
 
     def _show_settings(self) -> None:
-        if self._main_view is not None:
-            self._main_view.pack_forget()
+        # Rebuilt each time so the form reflects the live settings state and we
+        # don't carry stale widget references after a save.
+        if self._settings_view is not None:
+            self._stack.removeWidget(self._settings_view)
+            self._settings_view.deleteLater()
         self._settings_view = SettingsView(
-            self._root,
-            settings=self._settings,
-            on_save=self._on_settings_saved,
-            on_back=self._show_main,
+            self._settings, on_save=self._on_settings_saved, on_back=self._show_main
         )
-        self._settings_view.pack(fill="both", expand=True)
+        self._stack.addWidget(self._settings_view)
+        self._stack.setCurrentWidget(self._settings_view)
+
+    def _show_main(self) -> None:
+        self._main_view.refresh_after_settings(self._settings)
+        self._stack.setCurrentWidget(self._main_view)
 
     def _on_settings_saved(self, new_state: SettingsState) -> None:
         self._settings = new_state
         save_settings(self._settings)
         self._show_main()
 
-    # --- run loop ----------------------------------------------------------
 
-    def run(self) -> None:
-        self._root.mainloop()
+def build_app(argv: Optional[list[str]] = None) -> QApplication:
+    """Return a themed QApplication, reusing an existing instance if one is
+    already running (lets tests construct widgets without a second app)."""
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(argv if argv is not None else sys.argv)
+    apply_theme(app)
+    return app
 
 
 def main() -> int:
-    """Console-script entry point. Returns an exit code so PyInstaller
-    sees a clean exit."""
-    try:
-        App().run()
-        return 0
-    except KeyboardInterrupt:
-        return 130
+    """Console-script entry point. Returns an exit code so PyInstaller sees a
+    clean exit."""
+    app = build_app()
+    window = MainWindow()
+    window.show()
+    return app.exec()
 
 
 if __name__ == "__main__":

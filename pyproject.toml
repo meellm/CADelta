@@ -5,15 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cadelta"
 version = "0.1.0"
-description = "Visual diff for STEP CAD files — colors added/removed/moved parts in a single output."
+description = "Visual diff for STEP CAD files: colors added/removed/moved parts in a single output."
 requires-python = ">=3.11"
 dependencies = [
     "cadquery-ocp>=7.7",
     "numpy",
     "click",
-    # GUI runtime deps. Tkinter ships with CPython but tkinterdnd2 (drag-drop)
-    # and openpyxl (Excel report) are pip-only.
-    "tkinterdnd2>=0.3",
+    # GUI runtime deps. PySide6 (Qt) powers the desktop app; openpyxl backs
+    # the optional Excel report. Both are pip-only.
+    "PySide6>=6.6",
     "openpyxl>=3.1",
 ]
 
