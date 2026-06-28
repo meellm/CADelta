@@ -12,10 +12,10 @@ from typing import Optional
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget
 
-from .main_view import MainView
-from .settings import SettingsState, load_settings, save_settings
-from .settings_view import SettingsView
-from .theme import apply_theme
+from cadelta.gui.main_view import MainView
+from cadelta.gui.settings import SettingsState, load_settings, save_settings
+from cadelta.gui.settings_view import SettingsView
+from cadelta.gui.theme import apply_theme
 
 
 _WINDOW_TITLE = "CADelta"

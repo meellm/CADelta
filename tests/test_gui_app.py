@@ -8,6 +8,7 @@ file or a running event loop.
 from __future__ import annotations
 
 import os
+import runpy
 
 # Must be set before the first Qt import so QApplication picks the headless
 # platform plugin on CI machines without an X server / display.
@@ -29,6 +30,9 @@ from cadelta.gui.settings_view import SettingsView
 from cadelta.gui.worker import DiffJob, DoneMessage, ErrorMessage, PhaseMessage
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 @pytest.fixture(scope="module")
 def app():
     """A single themed QApplication for the whole module (Qt forbids more
@@ -48,6 +52,30 @@ def test_main_window_constructs_and_defaults_to_main_view(app):
     win = MainWindow()
     assert win.windowTitle() == "CADelta"
     assert win._stack.currentWidget() is win._main_view
+
+
+def test_gui_app_script_imports_without_package_context(app):
+    """PyInstaller executes the entry script outside package context; imports
+    must not depend on relative package state."""
+    namespace = runpy.run_path(
+        str(_REPO_ROOT / "src" / "cadelta" / "gui" / "app.py"),
+        run_name="cadelta_gui_app_probe",
+    )
+    assert callable(namespace["main"])
+
+
+def test_gui_package_entrypoint_imports_without_package_context(app):
+    namespace = runpy.run_path(
+        str(_REPO_ROOT / "src" / "cadelta" / "gui" / "__main__.py"),
+        run_name="cadelta_gui_main_probe",
+    )
+    assert callable(namespace["main"])
+
+
+def test_pyinstaller_spec_uses_package_entrypoint():
+    spec_text = (_REPO_ROOT / "build" / "cadelta_gui.spec").read_text()
+    assert '"__main__.py"' in spec_text
+    assert '"app.py")' not in spec_text
 
 
 def test_compare_button_disabled_until_both_files_chosen(app):

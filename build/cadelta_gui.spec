@@ -61,6 +61,7 @@ app_hidden = [
     "cadelta.reader",
     "cadelta.signature",
     "cadelta.writer",
+    "cadelta.gui.__main__",
     "cadelta.gui.app",
     "cadelta.gui.defaults",
     "cadelta.gui.excel_report",
@@ -74,7 +75,7 @@ app_hidden = [
 
 
 a = Analysis(
-    [os.path.join(REPO_ROOT, "src", "cadelta", "gui", "app.py")],
+    [os.path.join(REPO_ROOT, "src", "cadelta", "gui", "__main__.py")],
     pathex=[os.path.join(REPO_ROOT, "src")],
     binaries=ocp_binaries,
     datas=ocp_data,
