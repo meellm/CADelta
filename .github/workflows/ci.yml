@@ -1,0 +1,56 @@
+# Continuous integration: run the test suite on every push and pull request,
+# across Linux, macOS, and Windows. Catches OS-specific regressions in the
+# OCCT bindings (which behave differently across platforms) before they make
+# it into a release build.
+name: CI
+
+on:
+  push:
+    # Don't double-run on tags — release.yml already builds + tests when a
+    # version tag is pushed. Plain branch pushes still go through CI.
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+# Cancel in-progress runs on the same ref when a new commit lands.
+# Saves CI minutes when force-pushing or pushing rapidly during development.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }} / py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # `fail-fast: false` so a Mac-only OCCT hiccup doesn't kill the
+      # Linux+Windows runs — we want all three signals on every push.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.13"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          # Pip cache keyed on pyproject.toml — invalidates when deps change,
+          # otherwise reuses the wheel cache across runs. Big speedup since
+          # cadquery-ocp is ~150 MB to download.
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + dev deps
+        # `-e ".[dev]"` installs CADelta in editable mode plus pytest +
+        # pyinstaller. PyInstaller isn't used in CI tests but the [dev]
+        # extra is the same one developers use locally — keeping CI on the
+        # same install surface catches dependency drift.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest tests/ -v
